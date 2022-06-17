@@ -9,6 +9,9 @@ USER 1001
 
 EXPOSE 2112/tcp
 
-ENTRYPOINT [ "tawaret" ]
+ENTRYPOINT []
 
-CMD ["--daily-backups", $DAILY_BACKUPS, "--weekly-backups", $WEEKLY_BACKUPS, "--kanister-namespace", $KANISTER_NAMESPACE, "--blueprint-namespace", $BLUEPRINT_NAMESPACE, "--s3-profile", $S3_PROFILE "--eval-schedule", $EVAL_SCHEDULE]
+CMD /usr/local/bin/taweret 
+
+
+#--daily-backups $DAILY_BACKUPS --weekly-backups $WEEKLY_BACKUPS --kanister-namespace $KANISTER_NAMESPACE --blueprint-namespace $BLUEPRINT_NAMESPACE --s3-profile $S3_PROFILE --eval-schedule $EVAL_SCHEDULE
