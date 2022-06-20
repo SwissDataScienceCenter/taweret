@@ -60,7 +60,7 @@ jobs:
           password: ${{ secrets.RENKU_DOCKER_PASSWORD }}
       -
         name: get version tag from goreleaser metadata output
-        run: echo "TAG_VERSION=$(echo $json_var | jq '.tag' | tr -d \")" >> $GITHUB_ENV
+        run: echo "TAG_VERSION=$(echo $json_var | jq '.tag' | tr -d '\"v')" >> $GITHUB_ENV
         env: 
           json_var: ${{ needs.goreleaser.outputs.metadata }}
       -
