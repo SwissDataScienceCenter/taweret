@@ -57,7 +57,7 @@ func main() {
 		Resource: "actionsets",
 	}
 
-	fmt.Printf("Retaining %v daily, %v weekly backups\n", *dailyBackupsRetainedPtr, *weeklyBackupsRetainedPtr)
+	log.Printf("Retaining %v daily, %v weekly backups\n", *dailyBackupsRetainedPtr, *weeklyBackupsRetainedPtr)
 
 	//scheduler test
 	s := gocron.NewScheduler(time.UTC)
@@ -67,9 +67,9 @@ func main() {
 	}
 
 	s.StartAsync()
-	fmt.Println("Last run:", job.LastRun())
-	fmt.Println("Next run:", job.NextRun())
-	fmt.Println("Current run status:", job.IsRunning())
+	log.Println("Last run:", job.LastRun())
+	log.Println("Next run:", job.NextRun())
+	log.Println("Current run status:", job.IsRunning())
 
 	//prometheus metrics export test
 
@@ -90,7 +90,7 @@ var (
 
 func evaluateBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, kanisterNamespace string, dailyBackupsRetained int, weeklyBackupsRetained int, blueprintName string, s3ProfileName string) {
 
-	fmt.Println("Evaluating backups")
+	log.Println("Evaluating backups")
 
 	backups := getBackupActionsets(dynamicClient, gvr, kanisterNamespace)
 
@@ -103,33 +103,33 @@ func evaluateBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionRes
 	if len(dailyBackups) > dailyBackupsRetained {
 		deleteOldestBackups(dailyBackups, (len(dailyBackups) - dailyBackupsRetained), dynamicClient, gvr, kanisterNamespace, blueprintName, s3ProfileName)
 	} else {
-		fmt.Printf("No daily backups deleted: Current: %v Limit: %v\n", len(dailyBackups), dailyBackupsRetained)
+		log.Printf("No daily backups deleted: Current: %v Limit: %v\n", len(dailyBackups), dailyBackupsRetained)
 	}
 
 	//if there are excess weekly backups, delete the oldest excess
 	if len(weeklyBackups) > weeklyBackupsRetained {
 		deleteOldestBackups(weeklyBackups, (len(weeklyBackups) - weeklyBackupsRetained), dynamicClient, gvr, kanisterNamespace, blueprintName, s3ProfileName)
 	} else {
-		fmt.Printf("No weekly backups deleted: Current: %v Limit: %v\n", len(weeklyBackups), weeklyBackupsRetained)
+		log.Printf("No weekly backups deleted: Current: %v Limit: %v\n", len(weeklyBackups), weeklyBackupsRetained)
 	}
 
-	fmt.Printf("Backup evaluation complete\n---\n")
+	log.Printf("Backup evaluation complete\n---\n")
 }
 
 //queries Kubernetes for Actionsets, adds the actionsets with action name 'backup' to a slice of backup objects and returns the slice
 func getBackupActionsets(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, kanisterNamespace string) []backup {
 	var backups []backup
 
-	fmt.Println("Retrieving actionsets from Kubernetes")
+	log.Println("Retrieving actionsets from Kubernetes")
 
 	//get actionsets
 	actionsets, err := dynamicClient.Resource(gvr).Namespace(kanisterNamespace).List(context.Background(), v1.ListOptions{})
 	if err != nil {
-		fmt.Printf("Error getting actionsets: %v\n", err)
+		log.Printf("Error getting actionsets: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Println("Filtering backup actionsets from Kubernetes")
+	log.Println("Filtering backup actionsets from Kubernetes")
 
 	//loop through actionsets
 	for _, actionset := range actionsets.Items {
@@ -175,7 +175,7 @@ func categoriseBackups(uncategorisedBackups []backup, dailyBackupsRetained int, 
 	var dailyBackups []backup
 	var weeklyBackups []backup
 
-	fmt.Println("Categorising backups")
+	log.Println("Categorising backups")
 
 	start := time.Now()
 
@@ -200,14 +200,14 @@ func categoriseBackups(uncategorisedBackups []backup, dailyBackupsRetained int, 
 func deleteOldestBackups(backups []backup, count int, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, kanisterNamespace string, blueprintName string, s3ProfileName string) {
 	backups = sortBackups(backups)
 	for i := 0; i < count; i++ {
-		fmt.Printf("Deleting backup %v, backup time: %v, deletion nr %v, total to delete %v, total backups in category: %v\n", backups[i].name, backups[i].time.UTC(), i+1, count, len(backups))
+		log.Printf("Deleting backup %v, backup time: %v, deletion nr %v, total to delete %v, total backups in category: %v\n", backups[i].name, backups[i].time.UTC(), i+1, count, len(backups))
 		deleteBackup(backups[i], dynamicClient, gvr, kanisterNamespace, blueprintName, s3ProfileName)
 	}
 }
 
 //sort the backup slices with the oldest backups placed at the start of the slice
 func sortBackups(backups []backup) []backup {
-	fmt.Println("Sorting backups chronologically")
+	log.Println("Sorting backups chronologically")
 	sort.Slice(backups, func(q, p int) bool {
 		return backups[p].time.After(backups[q].time)
 	})
@@ -222,7 +222,7 @@ func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr sche
 	cmd := exec.Command("/usr/local/bin/kanctl", args...)
 	stdout, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Printf("%v\n", err)
+		log.Printf("%v\n", err)
 	}
 
 	//get name of deletion actionset
@@ -231,36 +231,36 @@ func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr sche
 
 	//loop to check status of deletion actionset whilst actionset is running
 	for {
-		fmt.Printf("Waiting for %v to complete... ", deletionActionsetName)
+		log.Printf("Waiting for %v to complete... ", deletionActionsetName)
 		time.Sleep(5 * time.Second)
 
 		//get deletion actionset
 		actionset, err := dynamicClient.Resource(gvr).Namespace(kanisterNamespace).Get(context.Background(), deletionActionsetName, v1.GetOptions{})
 		if err != nil {
-			fmt.Printf("Error retrieving deletion actionset: %v\n", err)
+			log.Printf("Error retrieving deletion actionset: %v\n", err)
 			os.Exit(1)
 		}
 
 		//check if deletion actionset status is "complete"
 		if actionset.Object["status"].(map[string]interface{})["state"] == "complete" {
-			fmt.Printf("%v has completed\n", deletionActionsetName)
+			log.Printf("%v has completed\n", deletionActionsetName)
 			break
 		}
 
 		//check if deletion actionset status is "failed"
 		if actionset.Object["status"].(map[string]interface{})["state"] == "failed" {
-			fmt.Printf("Error deleting backup: %v\n", deletionActionsetName)
+			log.Printf("Error deleting backup: %v\n", deletionActionsetName)
 			break
 		}
 
 		//print current state of deletion actionset
-		fmt.Printf("%v\n", actionset.Object["status"].(map[string]interface{})["state"])
+		log.Printf("%v\n", actionset.Object["status"].(map[string]interface{})["state"])
 	}
 
 	//delete backup actionset
 	err = dynamicClient.Resource(gvr).Namespace(kanisterNamespace).Delete(context.Background(), unusedBackup.name, v1.DeleteOptions{})
 	if err != nil {
-		fmt.Printf("Error deleting backup actionset: %v\n", err)
+		log.Printf("Error deleting backup actionset: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -268,14 +268,14 @@ func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr sche
 
 //Parse the stdout from kanctl. If kanctl created the deletion actionset successfully, returns the name of the deletion actionset, else prints the kanctl error and exits.
 func parseKanctlStdout(kanctlOutput string) string {
-	fmt.Println("Parsing kanctl output")
+	log.Println("Parsing kanctl output")
 	match, err := regexp.MatchString("^actionset.*created$", kanctlOutput)
 	if match {
 		deletionActionsetName := strings.TrimPrefix(kanctlOutput, "actionset ")
 		deletionActionsetName = strings.TrimSuffix(deletionActionsetName, " created")
 		return deletionActionsetName
 	} else {
-		fmt.Printf("Error getting kanctl output: %v match: %v error: %v \n ", kanctlOutput, match, err)
+		log.Printf("Error getting kanctl output: %v match: %v error: %v \n ", kanctlOutput, match, err)
 		os.Exit(1)
 	}
 	return kanctlOutput
