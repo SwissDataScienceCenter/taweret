@@ -219,7 +219,7 @@ func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr sche
 
 	//create kanctl deletion actionset
 	args := []string{"create", "actionset", "--action", "delete", "--from", unusedBackup.name, "--blueprint", blueprintName, "--profile", s3ProfileName, "--namespacetargets", kanisterNamespace, "-n", kanisterNamespace}
-	cmd := exec.Command("/Users/wjdj/repos/kanister/cmd/kanctl/kanctl", args...)
+	cmd := exec.Command("/usr/local/bin/kanctl", args...)
 	stdout, err := cmd.CombinedOutput()
 	if err != nil {
 		fmt.Printf("%v\n", err)
