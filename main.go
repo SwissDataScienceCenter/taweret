@@ -204,6 +204,7 @@ func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr sche
 
 	//create kanctl deletion actionset
 	args := []string{"create", "actionset", "--action", "delete", "--from", unusedBackup.name, "--blueprint", blueprintName, "--profile", s3ProfileName, "-n", kanisterNamespace, "--targetNamespace", kanisterNamespace}
+	log.Printf("kanctl args: %v", args)
 	cmd := exec.Command("/usr/local/bin/kanctl", args...)
 	stdout, err := cmd.CombinedOutput()
 	if err != nil {
