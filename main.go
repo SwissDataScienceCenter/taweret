@@ -133,38 +133,23 @@ func getBackupActionsets(dynamicClient dynamic.Interface, gvr schema.GroupVersio
 
 	//loop through actionsets
 	for _, actionset := range actionsets.Items {
+		actionSpec := actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})
+		actionMetadata := actionset.Object["metadata"].(map[string]interface{})
 
-		//check if the actionset is a backup
-		if actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["name"] == "backup" {
-
-			//initialise backup object and assign name
-			thisBackup := backup{name: fmt.Sprintf("%v", actionset.Object["metadata"].(map[string]interface{})["name"])}
-
-			//get creationTimestamp of actionset and assign to backup object time attribute
-			thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionset.Object["metadata"].(map[string]interface{})["creationTimestamp"]))
-
-			//get status of actionset and assign to backup object status attribute
-			thisBackup.status = fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"])
-
-			//check if the options map has been initialised before getting backup-schedule value. If the options map is not initialised, then trying to retrieve the backup-schedule value will result in a panic.
-			if actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["options"] != nil {
-
-				//check if the backup-schedule has a value assigned to it
-				if actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["options"].(map[string]interface{})["backup-schedule"] != nil {
-
-					//assign backup-schedule value to backup object schedule attribute
-					thisBackup.schedule = fmt.Sprintf("%v", actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["options"].(map[string]interface{})["backup-schedule"])
-				} else {
-
-					//if the backup-schedule attribute has no value or does not exist, assign the schedule attribute of the backup object to none.
-					thisBackup.schedule = "none"
+		// Skip ahead if the ActionSet is not a backup
+		if actionSpec["name"] != "backup" {
+			continue
+		}
+		if actionOptions, ok := actionSpec["options"]; ok {
+			if backupSchedule, ok := actionOptions.(map[string]interface{})["backup-schedule"]; ok {
+				thisBackup := backup{
+					name: fmt.Sprintf("%v", actionMetadata["name"]),
+					status: fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
+					schedule: fmt.Sprintf("%v", backupSchedule),
 				}
-			} else {
-
-				//if the options map is not initialised, assign the schedule attribute of the backup object to none.
-				thisBackup.schedule = "none"
+				thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
+				backups = append(backups, thisBackup)
 			}
-			backups = append(backups, thisBackup)
 		}
 	}
 	return backups
