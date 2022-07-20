@@ -143,8 +143,8 @@ func getBackupActionsets(dynamicClient dynamic.Interface, gvr schema.GroupVersio
 		if actionOptions, ok := actionSpec["options"]; ok {
 			if backupSchedule, ok := actionOptions.(map[string]interface{})["backup-schedule"]; ok {
 				thisBackup := backup{
-					name: fmt.Sprintf("%v", actionMetadata["name"]),
-					status: fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
+					name:     fmt.Sprintf("%v", actionMetadata["name"]),
+					status:   fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
 					schedule: fmt.Sprintf("%v", backupSchedule),
 				}
 				thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
@@ -203,7 +203,7 @@ func sortBackups(backups []backup) []backup {
 func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, kanisterNamespace string, blueprintName string, s3ProfileName string) {
 
 	//create kanctl deletion actionset
-	args := []string{"create", "actionset", "--action", "delete", "--from", unusedBackup.name, "--blueprint", blueprintName, "--profile", s3ProfileName, "-n", kanisterNamespace}
+	args := []string{"create", "actionset", "--action", "delete", "--from", unusedBackup.name, "--blueprint", blueprintName, "--profile", s3ProfileName, "-n", kanisterNamespace, "--targetNamespace", kanisterNamespace}
 	cmd := exec.Command("/usr/local/bin/kanctl", args...)
 	stdout, err := cmd.CombinedOutput()
 	if err != nil {
