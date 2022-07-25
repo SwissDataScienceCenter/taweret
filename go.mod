@@ -5,8 +5,8 @@ go 1.18
 require (
 	github.com/go-co-op/gocron v1.13.0
 	github.com/prometheus/client_golang v1.12.2
-	k8s.io/apimachinery v0.24.1
-	k8s.io/client-go v0.24.1
+	k8s.io/apimachinery v0.24.3
+	k8s.io/client-go v0.24.3
 )
 
 require (
