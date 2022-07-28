@@ -1,0 +1,13 @@
+charts:
+  - name: helm-chart/taweret
+    resetTag: latest
+    imagePrefix: renku/
+    repo:
+      git: SwissDataScienceCenter/helm-charts
+      published: https://swissdatasciencecenter.github.io/helm-charts
+    paths:
+      - helm-chart
+    images:
+      taweret:
+        contextPath: ./
+        dockerfilePath: ./Dockerfile
