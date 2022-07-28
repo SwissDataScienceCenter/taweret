@@ -1,10 +1,10 @@
-name: chartpress
+name: helm
 
 on:
   push:
     # run only against tags
     tags:
-      - '*'
+      - 'helm-*'
 
 permissions:
   contents: write
@@ -18,7 +18,7 @@ jobs:
           fetch-depth: 0
       - name: Set version
         id: vars
-        run: echo ::set-output name=tag::${GITHUB_REF#refs/*/}
+        run: echo ::set-output name=tag::$(echo ${GITHUB_REF#refs/*/} | tr -d 'helm-')
       - uses: SwissDataScienceCenter/renku-actions/publish-chart@master
         env:
           CHART_DIR: helm-chart/
