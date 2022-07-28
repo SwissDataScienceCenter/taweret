@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,6 +9,7 @@ import (
 	"os/exec"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,12 +31,34 @@ type backup struct {
 
 func main() {
 
-	dailyBackupsRetainedPtr := flag.Int("daily-backups", 7, "the amount of daily backups which should be retained")
-	weeklyBackupsRetainedPtr := flag.Int("weekly-backups", 4, "the amount of weekly backups which should be retained")
-	kanisterNamespacePtr := flag.String("kanister-namespace", "kanister", "the kubernetes namespace in which kanister resides")
-	blueprintNamePtr := flag.String("blueprint-name", "postgres-bp", "the blueprint of the backups which should be managed")
-	s3ProfileNamePtr := flag.String("s3-profile", "s3-profile", "the S3 profile of the S3 bucket which contains the backups")
-	evalSchedulePtr := flag.String("eval-schedule", "1/5 * * * *", "The cron schedule at which backups should be evaluated")
+	//get configuration options from environment variables
+	dailyBackupsRetained, err := strconv.Atoi(os.Getenv("DAILY_BACKUPS"))
+	if err != nil {
+		log.Fatalf("Error retrieving DAILY_BACKUPS env var: %v", err)
+	}
+
+	weeklyBackupsRetained, err := strconv.Atoi(os.Getenv("WEEKLY_BACKUPS"))
+	if err != nil {
+		log.Fatalf("Error retrieving WEEKLY_BACKUPS env var: %v", err)
+	}
+
+	kanisterNamespace := os.Getenv("KANISTER_NAMESPACE")
+	if len(kanisterNamespace) == 0 {
+		log.Fatalf("KANISTER_NAMESPACE value cannot be empty")
+	}
+
+	blueprintName := os.Getenv("BLUEPRINT_NAME")
+	if len(blueprintName) == 0 {
+		log.Fatalf("BLUEPRINT_NAME value cannot be empty")
+	}
+
+	s3ProfileName := os.Getenv("S3_PROFILE_NAME")
+	if len(s3ProfileName) == 0 {
+		log.Fatalf("S3_PROFILE_NAME value cannot be empty")
+	}
+
+	//set env schedule
+	const evalSchedule string = "1/5 * * * *"
 
 	//creates the in-cluster config
 	config, err := rest.InClusterConfig()
@@ -57,11 +79,14 @@ func main() {
 		Resource: "actionsets",
 	}
 
-	log.Printf("Retaining %v daily, %v weekly backups\n", *dailyBackupsRetainedPtr, *weeklyBackupsRetainedPtr)
+	log.Printf("Config options\nRetaining %v daily, %v weekly backups\n", dailyBackupsRetained, weeklyBackupsRetained)
+	log.Printf("Kanister namespace: %v\n", kanisterNamespace)
+	log.Printf("Blueprint name: %v\n", blueprintName)
+	log.Printf("S3 profile name: %v\n", s3ProfileName)
 
 	//scheduler test
 	s := gocron.NewScheduler(time.UTC)
-	job, err := s.Cron(*evalSchedulePtr).Do(evaluateBackups, dynamicClient, gvr, *kanisterNamespacePtr, *dailyBackupsRetainedPtr, *weeklyBackupsRetainedPtr, *blueprintNamePtr, *s3ProfileNamePtr)
+	job, err := s.Cron(evalSchedule).Do(evaluateBackups, dynamicClient, gvr, kanisterNamespace, dailyBackupsRetained, weeklyBackupsRetained, blueprintName, s3ProfileName)
 	if err != nil {
 		log.Fatalf("Error creating job: %v", err)
 	}
@@ -133,38 +158,23 @@ func getBackupActionsets(dynamicClient dynamic.Interface, gvr schema.GroupVersio
 
 	//loop through actionsets
 	for _, actionset := range actionsets.Items {
+		actionSpec := actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})
+		actionMetadata := actionset.Object["metadata"].(map[string]interface{})
 
-		//check if the actionset is a backup
-		if actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["name"] == "backup" {
-
-			//initialise backup object and assign name
-			thisBackup := backup{name: fmt.Sprintf("%v", actionset.Object["metadata"].(map[string]interface{})["name"])}
-
-			//get creationTimestamp of actionset and assign to backup object time attribute
-			thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionset.Object["metadata"].(map[string]interface{})["creationTimestamp"]))
-
-			//get status of actionset and assign to backup object status attribute
-			thisBackup.status = fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"])
-
-			//check if the options map has been initialised before getting backup-schedule value. If the options map is not initialised, then trying to retrieve the backup-schedule value will result in a panic.
-			if actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["options"] != nil {
-
-				//check if the backup-schedule has a value assigned to it
-				if actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["options"].(map[string]interface{})["backup-schedule"] != nil {
-
-					//assign backup-schedule value to backup object schedule attribute
-					thisBackup.schedule = fmt.Sprintf("%v", actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["options"].(map[string]interface{})["backup-schedule"])
-				} else {
-
-					//if the backup-schedule attribute has no value or does not exist, assign the schedule attribute of the backup object to none.
-					thisBackup.schedule = "none"
+		// Skip ahead if the ActionSet is not a backup
+		if actionSpec["name"] != "backup" {
+			continue
+		}
+		if actionOptions, ok := actionSpec["options"]; ok {
+			if backupSchedule, ok := actionOptions.(map[string]interface{})["backup-schedule"]; ok {
+				thisBackup := backup{
+					name:     fmt.Sprintf("%v", actionMetadata["name"]),
+					status:   fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
+					schedule: fmt.Sprintf("%v", backupSchedule),
 				}
-			} else {
-
-				//if the options map is not initialised, assign the schedule attribute of the backup object to none.
-				thisBackup.schedule = "none"
+				thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
+				backups = append(backups, thisBackup)
 			}
-			backups = append(backups, thisBackup)
 		}
 	}
 	return backups
@@ -218,7 +228,7 @@ func sortBackups(backups []backup) []backup {
 func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, kanisterNamespace string, blueprintName string, s3ProfileName string) {
 
 	//create kanctl deletion actionset
-	args := []string{"create", "actionset", "--action", "delete", "--from", unusedBackup.name, "--blueprint", blueprintName, "--profile", s3ProfileName, "-n", kanisterNamespace}
+	args := []string{"create", "actionset", "--action", "delete", "--from", unusedBackup.name, "--blueprint", blueprintName, "--profile", s3ProfileName, "-n", kanisterNamespace, "--namespacetargets", kanisterNamespace}
 	cmd := exec.Command("/usr/local/bin/kanctl", args...)
 	stdout, err := cmd.CombinedOutput()
 	if err != nil {

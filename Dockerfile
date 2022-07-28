@@ -1,9 +1,17 @@
-FROM bitnami/kubectl:1.21
+FROM --platform=linux/amd64 golang:1.18.4-alpine3.16 AS build
+WORKDIR /src
+ENV CGO_ENABLED=0
+COPY . .
+ARG TARGETOS
+ARG TARGETARCH
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /out/taweret .
+
+FROM bitnami/kubectl:1.21 AS bin
+COPY --from=build /out/taweret /usr/local/bin/
 
 USER root
 
-RUN /bin/bash -c "curl -L https://github.com/SwissDataScienceCenter/taweret/releases/download/v0.2.0-beta3/taweret_0.2.0-beta3_Linux_x86_64.tar.gz | tar xvz -C /usr/local/bin/; \
-curl -L https://github.com/kanisterio/kanister/releases/download/0.78.0/kanister_0.78.0_linux_amd64.tar.gz | tar xvz -C /usr/local/bin/"
+RUN /bin/bash -c "curl -L https://github.com/kanisterio/kanister/releases/download/0.78.0/kanister_0.78.0_linux_amd64.tar.gz | tar xvz -C /usr/local/bin/"
 
 USER 1001
 
@@ -14,8 +22,7 @@ ENV WEEKLY_BACKUPS=4
 ENV KANISTER_NAMESPACE=kanister
 ENV BLUEPRINT_NAME=blueprint
 ENV S3_PROFILE_NAME=s3profile
-ENV EVAL_SCHEDULE="1/5 * * * *"
 
 ENTRYPOINT []
 
-CMD /usr/local/bin/taweret --daily-backups ${DAILY_BACKUPS} --weekly-backups ${WEEKLY_BACKUPS} --kanister-namespace ${KANISTER_NAMESPACE} --blueprint-name ${BLUEPRINT_NAME} --s3-profile ${S3_PROFILE_NAME} --eval-schedule ${EVAL_SCHEDULE}
+CMD /usr/local/bin/taweret
