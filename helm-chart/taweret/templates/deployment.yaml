@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "taweret.fullname" . }}
+  labels:
+    {{- include "taweret.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "taweret.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "taweret.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "taweret.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.metrics.enabled }}
+          ports:
+            - containerPort: 2112
+              name: metrics
+              protocol: TCP
+          {{- end }}
+          env:
+            - name: DAILY_BACKUPS
+              value: "{{ .Values.backupConfigs.backup1.dailyBackups }}"
+            - name: WEEKLY_BACKUPS
+              value: "{{ .Values.backupConfigs.backup1.weeklyBackups }}"
+            - name: KANISTER_NAMESPACE
+              value: "{{ .Values.backupConfigs.backup1.kanisterNamespace }}"
+            - name: BLUEPRINT_NAME
+              value: "{{.Values.backupConfigs.backup1.blueprintName }}"
+            - name: S3_PROFILE_NAME
+              value: "{{.Values.backupConfigs.backup1.s3ProfileName }}"
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

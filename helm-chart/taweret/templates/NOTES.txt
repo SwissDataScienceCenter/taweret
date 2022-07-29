@@ -1,0 +1,1 @@
+You have installed Taweret chart version {{ .Chart.Version }}
