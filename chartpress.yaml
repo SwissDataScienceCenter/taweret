@@ -7,7 +7,3 @@ charts:
       published: https://swissdatasciencecenter.github.io/helm-charts
     paths:
       - helm-chart
-    images:
-      taweret:
-        contextPath: ./
-        dockerfilePath: ./Dockerfile
