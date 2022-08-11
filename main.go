@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -15,12 +17,14 @@ import (
 
 	"github.com/go-co-op/gocron"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"gopkg.in/yaml.v2"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/rest"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/homedir"
 )
 
 type backup struct {
@@ -29,139 +33,221 @@ type backup struct {
 	in_use                 bool
 }
 
+type backupconfig struct {
+	Name              string `yaml:"name"`
+	KanisterNamespace string `yaml:"kanisterNamespace"`
+	BlueprintName     string `yaml:"blueprintName"`
+	ProfileName       string `yaml:"profileName"`
+	Retention         struct {
+		Backups string `yaml:"backups"`
+		Minutes string `yaml:"minutes"`
+		Hours   string `yaml:"hours"`
+		Days    string `yaml:"days"`
+		Months  string `yaml:"months"`
+		Years   string `yaml:"years"`
+	}
+}
+
 func main() {
+	// creates the in-cluster config
+	// config, err := rest.InClusterConfig()
+	// if err != nil {
+	// 	panic(err.Error())
+	// }
 
-	//get configuration options from environment variables
-	dailyBackupsRetained, err := strconv.Atoi(os.Getenv("DAILY_BACKUPS"))
-	if err != nil {
-		log.Fatalf("Error retrieving DAILY_BACKUPS env var: %v", err)
+	// creates the out-of-cluster config
+	var kubeconfig *string
+	if home := homedir.HomeDir(); home != "" {
+		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
+	} else {
+		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
 	}
+	flag.Parse()
 
-	weeklyBackupsRetained, err := strconv.Atoi(os.Getenv("WEEKLY_BACKUPS"))
-	if err != nil {
-		log.Fatalf("Error retrieving WEEKLY_BACKUPS env var: %v", err)
-	}
-
-	kanisterNamespace := os.Getenv("KANISTER_NAMESPACE")
-	if len(kanisterNamespace) == 0 {
-		log.Fatalf("KANISTER_NAMESPACE value cannot be empty")
-	}
-
-	blueprintName := os.Getenv("BLUEPRINT_NAME")
-	if len(blueprintName) == 0 {
-		log.Fatalf("BLUEPRINT_NAME value cannot be empty")
-	}
-
-	s3ProfileName := os.Getenv("S3_PROFILE_NAME")
-	if len(s3ProfileName) == 0 {
-		log.Fatalf("S3_PROFILE_NAME value cannot be empty")
-	}
-
-	//set env schedule
-	const evalSchedule string = "1/5 * * * *"
-
-	//creates the in-cluster config
-	config, err := rest.InClusterConfig()
+	// use the current context in kubeconfig
+	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
 	if err != nil {
 		panic(err.Error())
 	}
 
-	//initialise dynamicclient
+	// initialise dynamicclient
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		panic(err.Error())
 	}
 
-	//specify the crds which should be queried
+	// create the clientset
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	// specify the crds which should be queried
 	gvr := schema.GroupVersionResource{
 		Group:    "cr.kanister.io",
 		Version:  "v1alpha1",
 		Resource: "actionsets",
 	}
 
-	log.Printf("Config options\nRetaining %v daily, %v weekly backups\n", dailyBackupsRetained, weeklyBackupsRetained)
-	log.Printf("Kanister namespace: %v\n", kanisterNamespace)
-	log.Printf("Blueprint name: %v\n", blueprintName)
-	log.Printf("S3 profile name: %v\n", s3ProfileName)
+	// prometheus gauge vector definition
+	backupCount := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "backup_count",
+			Help: "The amount of backups",
+		},
+		[]string{
+			// which backup config
+			"backup_config_name",
+			// state of the backups
+			"backup_status",
+		},
+	)
 
-	//scheduler test
-	s := gocron.NewScheduler(time.UTC)
-	job, err := s.Cron(evalSchedule).Do(evaluateBackups, dynamicClient, gvr, kanisterNamespace, dailyBackupsRetained, weeklyBackupsRetained, blueprintName, s3ProfileName)
-	if err != nil {
-		log.Fatalf("Error creating job: %v", err)
-	}
+	oldestBackup := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "oldest_backup",
+			Help: "The amount of backups",
+		},
+		[]string{
+			// which backup config
+			"backup_config_name",
+		},
+	)
 
-	s.StartAsync()
-	log.Println("Last run:", job.LastRun())
-	log.Println("Next run:", job.NextRun())
-	log.Println("Current run status:", job.IsRunning())
+	youngestBackup := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "youngest_count",
+			Help: "The amount of backups",
+		},
+		[]string{
+			// which backup config
+			"backup_config_name",
+		},
+	)
 
-	//prometheus metrics export test
+	prometheus.MustRegister(backupCount)
+	prometheus.MustRegister(oldestBackup)
+	prometheus.MustRegister(youngestBackup)
+
+	backupConfigs := getBackupConfigs(clientset, gvr)
+
+	scheduleEvaluations(dynamicClient, gvr, backupCount, oldestBackup, youngestBackup, backupConfigs)
 
 	http.Handle("/metrics", promhttp.Handler())
 	http.ListenAndServe(":2112", nil)
 }
 
-var (
-	dailyBackupCount = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "backup_count_daily",
-		Help: "The total amount of daily backups",
-	})
-	weeklyBackupCount = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "backup_count_weekly",
-		Help: "The total amount of weekly backups",
-	})
-)
-
-func evaluateBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, kanisterNamespace string, dailyBackupsRetained int, weeklyBackupsRetained int, blueprintName string, s3ProfileName string) {
-
-	log.Println("Evaluating backups")
-
-	backups := getBackupActionsets(dynamicClient, gvr, kanisterNamespace)
-
-	dailyBackups, weeklyBackups := categoriseBackups(backups, dailyBackupsRetained, weeklyBackupsRetained)
-
-	dailyBackupCount.Set(float64(len(dailyBackups)))
-	weeklyBackupCount.Set(float64(len(weeklyBackups)))
-
-	//if there are excess daily backups, delete the oldest excess
-	if len(dailyBackups) > dailyBackupsRetained {
-		deleteOldestBackups(dailyBackups, (len(dailyBackups) - dailyBackupsRetained), dynamicClient, gvr, kanisterNamespace, blueprintName, s3ProfileName)
-	} else {
-		log.Printf("No daily backups deleted: Current: %v Limit: %v\n", len(dailyBackups), dailyBackupsRetained)
-	}
-
-	//if there are excess weekly backups, delete the oldest excess
-	if len(weeklyBackups) > weeklyBackupsRetained {
-		deleteOldestBackups(weeklyBackups, (len(weeklyBackups) - weeklyBackupsRetained), dynamicClient, gvr, kanisterNamespace, blueprintName, s3ProfileName)
-	} else {
-		log.Printf("No weekly backups deleted: Current: %v Limit: %v\n", len(weeklyBackups), weeklyBackupsRetained)
-	}
-
-	log.Printf("Backup evaluation complete\n---\n")
-}
-
-//queries Kubernetes for Actionsets, adds the actionsets with action name 'backup' to a slice of backup objects and returns the slice
-func getBackupActionsets(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, kanisterNamespace string) []backup {
-	var backups []backup
-
-	log.Println("Retrieving actionsets from Kubernetes")
-
-	//get actionsets
-	actionsets, err := dynamicClient.Resource(gvr).Namespace(kanisterNamespace).List(context.Background(), v1.ListOptions{})
+func getBackupConfigs(clientset *kubernetes.Clientset, gvr schema.GroupVersionResource) []backupconfig {
+	var backupConfigs []backupconfig
+	// get configmaps
+	configmaps, err := clientset.CoreV1().ConfigMaps("kanister").List(context.TODO(), v1.ListOptions{})
 	if err != nil {
-		log.Printf("Error getting actionsets: %v\n", err)
+		log.Printf("error getting actionsets: %v\n", err)
 		os.Exit(1)
 	}
 
-	log.Println("Filtering backup actionsets from Kubernetes")
+	for _, configmap := range configmaps.Items {
+		if configmap.Data["backup-config.yaml"] != "" {
+			var backupConfig backupconfig
 
-	//loop through actionsets
+			err = yaml.Unmarshal([]byte(configmap.Data["backup-config.yaml"]), &backupConfig)
+			if err != nil {
+				log.Printf("error unmarshalling backup-config.yaml: %v\n", err)
+				os.Exit(1)
+			}
+
+			backupConfigs = append(backupConfigs, backupConfig)
+
+			log.Printf("backup config:\n name: %v\n kanister namespace: %v\n blueprint name: %v\n profile name: %v\n retention:\n backups: %v\n years: %v months: %v days: %v hours %v minutes: %v", backupConfig.Name, backupConfig.KanisterNamespace, backupConfig.BlueprintName, backupConfig.ProfileName, backupConfig.Retention.Backups, backupConfig.Retention.Years, backupConfig.Retention.Months, backupConfig.Retention.Days, backupConfig.Retention.Hours, backupConfig.Retention.Minutes)
+		}
+	}
+	return backupConfigs
+}
+
+func scheduleEvaluations(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupCount *prometheus.GaugeVec, oldestBackup *prometheus.GaugeVec, youngestBackup *prometheus.GaugeVec, backupConfigs []backupconfig) {
+
+	// set eval schedule
+	const evalSchedule string = "1/1 * * * *"
+
+	// schedule evaluation of every backupConfig
+	for _, backupConfig := range backupConfigs {
+		s := gocron.NewScheduler(time.UTC)
+		job, err := s.Cron(evalSchedule).Do(evaluateBackups, dynamicClient, gvr, backupCount, oldestBackup, youngestBackup, backupConfig)
+		if err != nil {
+			log.Fatalf("%v: error creating job: %v", backupConfig.Name, err)
+		}
+		s.StartAsync()
+		log.Printf("%v: next run: %v\n", backupConfig.Name, job.NextRun())
+	}
+}
+
+func evaluateBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupCount *prometheus.GaugeVec, oldestBackup *prometheus.GaugeVec, youngestBackup *prometheus.GaugeVec, backupConfig backupconfig) {
+
+	log.Printf("%v: evaluating backups\n", backupConfig.Name)
+
+	backups := getBackups(dynamicClient, gvr, backupConfig)
+
+	categorisedBackups, failedBackupCount := categoriseBackups(backups, backupConfig)
+
+	maxBackups, err := strconv.Atoi(backupConfig.Retention.Backups)
+	if err != nil {
+		log.Printf("%v: error converting maxBackups to int: %v\n", backupConfig.Name, err)
+		os.Exit(1)
+	}
+
+	// if there are excess daily backups, delete the oldest excess, then refetch and recategorise the backups
+	if len(categorisedBackups) > maxBackups {
+		deleteOldestBackups(categorisedBackups, (len(categorisedBackups) - maxBackups), dynamicClient, gvr, backupConfig)
+		backups = getBackups(dynamicClient, gvr, backupConfig)
+		categorisedBackups, failedBackupCount = categoriseBackups(backups, backupConfig)
+	} else {
+		log.Printf("%v: no backups deleted: current: %v limit: %v\n", backupConfig.Name, len(categorisedBackups), maxBackups)
+	}
+
+	setPrometheusMetrics(categorisedBackups, backupCount, oldestBackup, youngestBackup, backupConfig, failedBackupCount)
+
+	log.Printf("%v: backup evaluation complete\n", backupConfig.Name)
+}
+
+func setPrometheusMetrics(backups []backup, backupCount *prometheus.GaugeVec, oldestBackup *prometheus.GaugeVec, youngestBackup *prometheus.GaugeVec, backupConfig backupconfig, failedBackupCount int) {
+
+	log.Printf("%v: updating Prometheus metrics\n", backupConfig.Name)
+	// set oldest and youngest backup metric values if backups exist, else set values to 0
+	if len(backups) > 0 {
+		oldestBackup.WithLabelValues(backupConfig.Name).Set(float64(backups[0].time.Unix()))
+		youngestBackup.WithLabelValues(backupConfig.Name).Set(float64(backups[len(backups)-1].time.Unix()))
+
+	} else {
+		oldestBackup.WithLabelValues(backupConfig.Name).Set(0)
+		youngestBackup.WithLabelValues(backupConfig.Name).Set(0)
+	}
+
+	// set backupCount for completed and failed backups
+	backupCount.WithLabelValues(backupConfig.Name, "completed").Set(float64(len(backups)))
+	backupCount.WithLabelValues(backupConfig.Name, "failed").Set(float64(failedBackupCount))
+}
+
+// queries Kubernetes for Actionsets, adds the actionsets with action name 'backup' to a slice of backup objects and returns the slice
+func getBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) []backup {
+	var backups []backup
+
+	log.Printf("%v: retrieving actionsets from Kubernetes", backupConfig.Name)
+
+	// get actionsets
+	actionsets, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).List(context.Background(), v1.ListOptions{})
+	if err != nil {
+		log.Printf("%v: error getting actionsets: %v\n", backupConfig.Name, err)
+		os.Exit(1)
+	}
+
+	log.Printf("%v: filtering backup actionsets from Kubernetes", backupConfig.Name)
+
+	// loop through actionsets
 	for _, actionset := range actionsets.Items {
 		actionSpec := actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})
 		actionMetadata := actionset.Object["metadata"].(map[string]interface{})
 
-		// Skip ahead if the ActionSet is not a backup
+		// skip ahead if the ActionSet is not a backup
 		if actionSpec["name"] != "backup" {
 			continue
 		}
@@ -173,119 +259,148 @@ func getBackupActionsets(dynamicClient dynamic.Interface, gvr schema.GroupVersio
 					schedule: fmt.Sprintf("%v", backupSchedule),
 				}
 				thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
-				backups = append(backups, thisBackup)
+				if thisBackup.schedule == backupConfig.Name {
+					backups = append(backups, thisBackup)
+				}
 			}
 		}
 	}
 	return backups
 }
 
-//determine whether individual backups are required based on max retention dates and their category (daily, weekly, none)
-func categoriseBackups(uncategorisedBackups []backup, dailyBackupsRetained int, weeklyBackupsRetained int) ([]backup, []backup) {
-	var dailyBackups []backup
-	var weeklyBackups []backup
+// determine whether individual backups are required based on max retention dates and their category (daily, weekly, none)
+func categoriseBackups(uncategorisedBackups []backup, backupConfig backupconfig) ([]backup, int) {
+	var categorisedBackups []backup
+	failedBackupCount := 0
 
-	log.Println("Categorising backups")
+	log.Printf("%v: categorising backups\n", backupConfig.Name)
 
-	start := time.Now()
+	maxBackupDateTime := time.Now()
 
-	//find the oldest date a daily backup should be
-	maxDailyBackupDate := start.AddDate(0, 0, dailyBackupsRetained*-1)
-	//find the oldest date a weekly backup should be
-	maxWeeklyBackupDate := start.AddDate(0, 0, weeklyBackupsRetained*7*-1)
+	retentionMinutes, err := strconv.Atoi(backupConfig.Retention.Minutes)
+	if err != nil {
+		log.Printf("%v: error converting retention minutes to int: %v\n", backupConfig.Name, err)
+		os.Exit(1)
+	}
+	retentionHours, err := strconv.Atoi(backupConfig.Retention.Hours)
+	if err != nil {
+		log.Printf("%v: error converting retention hours to int: %v\n", backupConfig.Name, err)
+		os.Exit(1)
+	}
+	retentionDays, err := strconv.Atoi(backupConfig.Retention.Days)
+	if err != nil {
+		log.Printf("%v: error converting retention days to int: %v\n", backupConfig.Name, err)
+		os.Exit(1)
+	}
+	retentionMonths, err := strconv.Atoi(backupConfig.Retention.Hours)
+	if err != nil {
+		log.Printf("%v: error converting retention months to int: %v\n", backupConfig.Name, err)
+		os.Exit(1)
+	}
+	retentionYears, err := strconv.Atoi(backupConfig.Retention.Minutes)
+	if err != nil {
+		log.Printf("%v: error converting retention years to int: %v\n", backupConfig.Name, err)
+		os.Exit(1)
+	}
+
+	maxBackupDateTime = maxBackupDateTime.Add(time.Minute * time.Duration(retentionMinutes) * -1)
+	maxBackupDateTime = maxBackupDateTime.Add(time.Hour * time.Duration(retentionHours) * -1)
+	maxBackupDateTime = maxBackupDateTime.AddDate(retentionYears*-1, retentionMonths*-1, retentionDays*-1)
 
 	for _, aBackup := range uncategorisedBackups {
-		if aBackup.time.After(maxDailyBackupDate) && aBackup.status == "complete" && aBackup.schedule == "daily" {
+		if aBackup.time.After(maxBackupDateTime) && aBackup.status == "complete" {
 			aBackup.in_use = true
-			dailyBackups = append(dailyBackups, aBackup)
-		} else if aBackup.time.After(maxWeeklyBackupDate) && aBackup.status == "complete" && aBackup.schedule == "weekly" {
-			aBackup.in_use = true
-			weeklyBackups = append(weeklyBackups, aBackup)
+			categorisedBackups = append(categorisedBackups, aBackup)
+		} else if aBackup.status != "complete" {
+			failedBackupCount++
 		}
 	}
-	return dailyBackups, weeklyBackups
+
+	categorisedAndSortedBackups := sortBackups(categorisedBackups, backupConfig)
+
+	return categorisedAndSortedBackups, failedBackupCount
 }
 
-//delete a specified number of the oldest backups in a backup slice
-func deleteOldestBackups(backups []backup, count int, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, kanisterNamespace string, blueprintName string, s3ProfileName string) {
-	backups = sortBackups(backups)
+// delete a specified number of the oldest backups in a backup slice
+func deleteOldestBackups(backups []backup, count int, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) {
+	backups = sortBackups(backups, backupConfig)
 	for i := 0; i < count; i++ {
-		log.Printf("Deleting backup %v, backup time: %v, deletion nr %v, total to delete %v, total backups in category: %v\n", backups[i].name, backups[i].time.UTC(), i+1, count, len(backups))
-		deleteBackup(backups[i], dynamicClient, gvr, kanisterNamespace, blueprintName, s3ProfileName)
+		log.Printf("%v: deleting backup %v, backup time: %v, deletion nr %v, total to delete %v, total backups in category: %v\n", backupConfig.Name, backups[i].name, backups[i].time.UTC(), i+1, count, len(backups))
+		deleteBackup(backups[i], dynamicClient, gvr, backupConfig)
 	}
 }
 
-//sort the backup slices with the oldest backups placed at the start of the slice
-func sortBackups(backups []backup) []backup {
-	log.Println("Sorting backups chronologically")
+// sort the backup slices with the oldest backups placed at the start of the slice
+func sortBackups(backups []backup, backupConfig backupconfig) []backup {
+	log.Printf("%v: sorting backups chronologically\n", backupConfig.Name)
 	sort.Slice(backups, func(q, p int) bool {
 		return backups[p].time.After(backups[q].time)
 	})
 	return backups
 }
 
-//deletes a specified backup by creating an actionset with the action 'delete'
-func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, kanisterNamespace string, blueprintName string, s3ProfileName string) {
+// deletes a specified backup by creating an actionset with the action 'delete'
+func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) {
 
-	//create kanctl deletion actionset
-	args := []string{"create", "actionset", "--action", "delete", "--from", unusedBackup.name, "--blueprint", blueprintName, "--profile", s3ProfileName, "-n", kanisterNamespace, "--namespacetargets", kanisterNamespace}
+	// create kanctl deletion actionset
+	args := []string{"create", "actionset", "--action", "delete", "--from", unusedBackup.name, "--blueprint", backupConfig.BlueprintName, "--profile", backupConfig.ProfileName, "-n", backupConfig.KanisterNamespace, "--namespacetargets", backupConfig.KanisterNamespace}
 	cmd := exec.Command("/usr/local/bin/kanctl", args...)
 	stdout, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("%v\n", err)
+		log.Printf("%v: %v\n", backupConfig.Name, err)
 	}
 
-	//get name of deletion actionset
+	// get name of deletion actionset
 	kanctlOutput := strings.TrimSpace(string(stdout))
 	deletionActionsetName := parseKanctlStdout(kanctlOutput)
 
-	//loop to check status of deletion actionset whilst actionset is running
+	// loop to check status of deletion actionset whilst actionset is running
 	for {
-		log.Printf("Waiting for %v to complete... ", deletionActionsetName)
+		log.Printf("%v: waiting for %v to complete... ", backupConfig.Name, deletionActionsetName)
 		time.Sleep(5 * time.Second)
 
-		//get deletion actionset
-		actionset, err := dynamicClient.Resource(gvr).Namespace(kanisterNamespace).Get(context.Background(), deletionActionsetName, v1.GetOptions{})
+		// get deletion actionset
+		actionset, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Get(context.Background(), deletionActionsetName, v1.GetOptions{})
 		if err != nil {
-			log.Printf("Error retrieving deletion actionset: %v\n", err)
+			log.Printf("%v: error retrieving deletion actionset: %v\n", backupConfig.Name, err)
 			os.Exit(1)
 		}
 
-		//check if deletion actionset status is "complete"
+		// check if deletion actionset status is "complete"
 		if actionset.Object["status"].(map[string]interface{})["state"] == "complete" {
-			log.Printf("%v has completed\n", deletionActionsetName)
+			log.Printf("%v: %v has completed\n", backupConfig.Name, deletionActionsetName)
 			break
 		}
 
-		//check if deletion actionset status is "failed"
+		// check if deletion actionset status is "failed"
 		if actionset.Object["status"].(map[string]interface{})["state"] == "failed" {
-			log.Printf("Error deleting backup: %v\n", deletionActionsetName)
+			log.Printf("%v: error deleting backup: %v\n", backupConfig.Name, deletionActionsetName)
 			break
 		}
 
-		//print current state of deletion actionset
+		// print current state of deletion actionset
 		log.Printf("%v\n", actionset.Object["status"].(map[string]interface{})["state"])
 	}
 
-	//delete backup actionset
-	err = dynamicClient.Resource(gvr).Namespace(kanisterNamespace).Delete(context.Background(), unusedBackup.name, v1.DeleteOptions{})
+	// delete backup actionset
+	err = dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Delete(context.Background(), unusedBackup.name, v1.DeleteOptions{})
 	if err != nil {
-		log.Printf("Error deleting backup actionset: %v\n", err)
+		log.Printf("%v: error deleting backup actionset: %v\n", backupConfig.Name, err)
 		os.Exit(1)
 	}
 
 }
 
-//Parse the stdout from kanctl. If kanctl created the deletion actionset successfully, returns the name of the deletion actionset, else prints the kanctl error and exits.
+// parse the stdout from kanctl. If kanctl created the deletion actionset successfully, returns the name of the deletion actionset, else prints the kanctl error and exits.
 func parseKanctlStdout(kanctlOutput string) string {
-	log.Println("Parsing kanctl output")
+	log.Println("parsing kanctl output")
 	match, err := regexp.MatchString("^actionset.*created$", kanctlOutput)
 	if match {
 		deletionActionsetName := strings.TrimPrefix(kanctlOutput, "actionset ")
 		deletionActionsetName = strings.TrimSuffix(deletionActionsetName, " created")
 		return deletionActionsetName
 	} else {
-		log.Printf("Error getting kanctl output: %v match: %v error: %v \n ", kanctlOutput, match, err)
+		log.Printf("error getting kanctl output: %v match: %v error: %v \n ", kanctlOutput, match, err)
 		os.Exit(1)
 	}
 	return kanctlOutput

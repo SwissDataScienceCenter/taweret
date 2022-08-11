@@ -10,13 +10,30 @@ image:
 
 # Customise Taweret behaviour
 backupConfigs:
-  # Currently, only a single backup config, 'backup1' is supported
-  backup1:
-    dailyBackups: 7
-    weeklyBackups: 4
+  daily-postgres:
+    name: daily-postgres
     kanisterNamespace: kanister
     blueprintName: postgres-bp
-    s3ProfileName: s3-profile
+    profileName: default-profile
+    retention:
+      backups: 7
+      minutes: 0
+      hours: 0
+      days: 7
+      months: 0
+      years: 0
+  # weekly-postgres:
+  #   name: weekly-postgres
+  #   kanisterNamespace: kanister
+  #   blueprintName: postgres-bp
+  #   profileName: default-profile
+  #   retention:
+  #     backups: 3
+  #     minutes: 0
+  #     hours: 0
+  #     days: 21
+  #     months: 0
+  #     years: 0
 
 imagePullSecrets: []
 nameOverride: ""
