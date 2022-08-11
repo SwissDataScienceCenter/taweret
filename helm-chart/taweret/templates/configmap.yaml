@@ -1,0 +1,20 @@
+{{- range $.Values.backupConfigs }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: taweret-backupconfig-{{ .name }}
+data:
+  backup-config.yaml: |-
+    name: {{ .name }}
+    kanisterNamespace: {{ .kanisterNamespace }}
+    blueprintName: {{ .blueprintName }}
+    profileName: {{ .profileName }}
+    retention:
+      backups: {{ .retention.backups }}
+      minutes: {{ .retention.minutes }}
+      hours: {{ .retention.hours }}
+      days: {{ .retention.days }}
+      months: {{ .retention.months }}
+      years: {{ .retention.years }}
+---
+{{- end }}

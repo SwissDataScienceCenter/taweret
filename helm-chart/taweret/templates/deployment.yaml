@@ -37,17 +37,6 @@ spec:
               name: metrics
               protocol: TCP
           {{- end }}
-          env:
-            - name: DAILY_BACKUPS
-              value: "{{ .Values.backupConfigs.backup1.dailyBackups }}"
-            - name: WEEKLY_BACKUPS
-              value: "{{ .Values.backupConfigs.backup1.weeklyBackups }}"
-            - name: KANISTER_NAMESPACE
-              value: "{{ .Values.backupConfigs.backup1.kanisterNamespace }}"
-            - name: BLUEPRINT_NAME
-              value: "{{.Values.backupConfigs.backup1.blueprintName }}"
-            - name: S3_PROFILE_NAME
-              value: "{{.Values.backupConfigs.backup1.s3ProfileName }}"
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}
