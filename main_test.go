@@ -38,7 +38,7 @@ func newUnstructuredBackup(name, namespace, creationTimestamp, actionName, sched
 	}
 }
 
-func TestGetBackupActionsets(t *testing.T) {
+func TestGetBackups(t *testing.T) {
 	defaultTime, _ := time.Parse(time.RFC3339, "2022-01-01T02:03:04.52Z")
 	expectedBackups := []backup{
 		{name: "backup-foo", schedule: "weekly", status: "complete", time: defaultTime},
@@ -61,7 +61,11 @@ func TestGetBackupActionsets(t *testing.T) {
 		newUnstructuredBackup("backup-baz", "kanister", "2022-01-01T02:03:04.52Z", "not-a-backup", "daily", "complete"),
 	)
 
-	backups := getBackupActionsets(client, gvr, "kanister")
+	var backupConfig backupconfig
+	backupConfig.KanisterNamespace = "kanister"
+	backupConfig.Name = "daily"
+
+	backups := getBackups(client, gvr, backupConfig)
 	if len(backups) < 1 {
 		t.Fatal("Empty backups")
 	}
