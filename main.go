@@ -54,6 +54,14 @@ type taweretmetrics struct {
 	newestBackup *prometheus.GaugeVec
 }
 
+type backupcounts struct {
+	pending  int
+	running  int
+	failed   int
+	skipped  int
+	deleting int
+}
+
 func main() {
 	// creates the in-cluster config
 	config, err := rest.InClusterConfig()
@@ -122,18 +130,18 @@ func evaluateBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionRes
 
 	backups := getBackups(dynamicClient, gvr, backupConfig)
 
-	categorisedBackups, failedBackupCount := categoriseBackups(backups, backupConfig)
+	categorisedBackups, backupCounts := categoriseBackups(backups, backupConfig)
 
 	// if there are excess daily backups, delete the oldest excess, then refetch and recategorise the backups
 	if len(categorisedBackups) > int(backupConfig.Retention.Backups) {
 		deleteOldestBackups(categorisedBackups, (len(categorisedBackups) - int(backupConfig.Retention.Backups)), dynamicClient, gvr, backupConfig)
 		backups = getBackups(dynamicClient, gvr, backupConfig)
-		categorisedBackups, failedBackupCount = categoriseBackups(backups, backupConfig)
+		categorisedBackups, backupCounts = categoriseBackups(backups, backupConfig)
 	} else {
 		log.Printf("%v: no backups deleted: current: %v limit: %v\n", backupConfig.Name, len(categorisedBackups), backupConfig.Retention.Backups)
 	}
 
-	taweretMetrics.setMetrics(categorisedBackups, backupConfig, failedBackupCount)
+	taweretMetrics.setMetrics(categorisedBackups, backupConfig, backupCounts)
 
 	log.Printf("%v: backup evaluation complete\n", backupConfig.Name)
 }
@@ -207,9 +215,15 @@ func getBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource
 }
 
 // determine whether individual backups are required based on max retention dates and their category (daily, weekly, none)
-func categoriseBackups(uncategorisedBackups []backup, backupConfig backupconfig) ([]backup, int) {
+func categoriseBackups(uncategorisedBackups []backup, backupConfig backupconfig) ([]backup, backupcounts) {
 	var categorisedBackups []backup
-	failedBackupCount := 0
+	backupCounts := backupcounts{
+		pending:  0,
+		running:  0,
+		failed:   0,
+		skipped:  0,
+		deleting: 0,
+	}
 
 	log.Printf("%v: categorising backups\n", backupConfig.Name)
 
@@ -223,14 +237,22 @@ func categoriseBackups(uncategorisedBackups []backup, backupConfig backupconfig)
 		if aBackup.time.After(maxBackupDateTime) && aBackup.status == "complete" {
 			aBackup.in_use = true
 			categorisedBackups = append(categorisedBackups, aBackup)
-		} else if aBackup.status != "complete" {
-			failedBackupCount++
+		} else if aBackup.status == "pending" {
+			backupCounts.pending++
+		} else if aBackup.status == "running" {
+			backupCounts.running++
+		} else if aBackup.status == "failed" || aBackup.status == "attemptfailed" {
+			backupCounts.failed++
+		} else if aBackup.status == "skipped" {
+			backupCounts.skipped++
+		} else if aBackup.status == "deleting" {
+			backupCounts.deleting++
 		}
 	}
 
 	categorisedAndSortedBackups := sortBackups(categorisedBackups, backupConfig)
 
-	return categorisedAndSortedBackups, failedBackupCount
+	return categorisedAndSortedBackups, backupCounts
 }
 
 // delete a specified number of the oldest backups in a backup slice
@@ -383,7 +405,7 @@ func initialiseMetrics() taweretmetrics {
 }
 
 // set Prometheus metrics values
-func (taweretMetrics *taweretmetrics) setMetrics(backups []backup, backupConfig backupconfig, failedBackupCount int) {
+func (taweretMetrics *taweretmetrics) setMetrics(backups []backup, backupConfig backupconfig, backupCounts backupcounts) {
 	log.Printf("%v: setting Prometheus metrics\n", backupConfig.Name)
 
 	// set newestBackup and oldestBackup to corresponding backup timestamps if backups are present
@@ -396,7 +418,11 @@ func (taweretMetrics *taweretmetrics) setMetrics(backups []backup, backupConfig 
 		taweretMetrics.newestBackup.WithLabelValues(backupConfig.Name).Set(0)
 	}
 
-	// set backupCount for completed and failed backups
+	// set backupCount for completed, pending, running, failed, skipped and deleting state backups
 	taweretMetrics.backupCount.WithLabelValues(backupConfig.Name, "completed").Set(float64(len(backups)))
-	taweretMetrics.backupCount.WithLabelValues(backupConfig.Name, "failed").Set(float64(failedBackupCount))
+	taweretMetrics.backupCount.WithLabelValues(backupConfig.Name, "pending").Set(float64(backupCounts.pending))
+	taweretMetrics.backupCount.WithLabelValues(backupConfig.Name, "running").Set(float64(backupCounts.running))
+	taweretMetrics.backupCount.WithLabelValues(backupConfig.Name, "failed").Set(float64(backupCounts.failed))
+	taweretMetrics.backupCount.WithLabelValues(backupConfig.Name, "skipped").Set(float64(backupCounts.skipped))
+	taweretMetrics.backupCount.WithLabelValues(backupConfig.Name, "deleting").Set(float64(backupCounts.deleting))
 }
