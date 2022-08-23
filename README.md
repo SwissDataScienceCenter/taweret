@@ -3,11 +3,38 @@ A [Kanister](https://github.com/kanisterio/kanister) backup management system.
 
 Taweret sets retention periods for Kanister backups and deletes them once they expire by interacting with Kanister CRDs.
 
-This project is in a very early development phase. Please check the issues tracker for planned features, or to submit any feature requests.
+This project is in an early development phase. Please check the issues tracker for planned features, or to submit any feature requests.
 
 ## How to
 
-Taweret should be deployed to a Kubernetes cluster which already runs Kanister. A Taweret Helm chart does not yet exist.
+Taweret should be deployed to a Kubernetes cluster which already runs Kanister. 
+
+### Taweret
+
+Taweret can be installed through its Helm chart:
+
+    helm repo add renku https://swissdatasciencecenter.github.io/helm-charts
+    helm install taweret renku/taweret
+
+Backup configurations can be defined in the Helm values file. The default backup configuration is:
+
+    backupConfigs:
+      daily-postgres:
+        name: daily-postgres
+        kanisterNamespace: kanister
+        blueprintName: postgres-bp
+        profileName: default-profile
+        retention:
+          backups: 7
+          minutes: 0
+          hours: 0
+          days: 7
+          months: 0
+          years: 0
+
+The Taweret version which is installed can be set by specifying the image tag used by the Helm chart. To see the available image tags, please check the tags in the GitHub repo.
+
+Please be aware that the default image tag set in the Helm chart may not always be the most up to date Taweret image.
 
 ### Backup CronJob
 
@@ -46,7 +73,7 @@ Backup `CronJob`s can be configured in Kubernetes following the example backup `
                     - name: STATEFULSET
                       value: postgres/my-postgresql-db
                     - name: PROFILE
-                      value: s3-profile
+                      value: default-profile
                   args:
                     - |
                       curl -L https://github.com/kanisterio/kanister/releases/download/0.78.0/kanister_0.78.0_linux_amd64.tar.gz | tar xvz -C /usr/local/bin/
@@ -54,10 +81,9 @@ Backup `CronJob`s can be configured in Kubernetes following the example backup `
                   serviceAccountName: kanister-sa
               restartPolicy: Never
 
-
 ### Kanister ServiceAccount
 
-The `ServiceAccount` used by a `CronJob`, which in the case of the example above is `kanister-sa`, should have permission to create `ActionSet`s, read `Blueprint`s and `Profile`s in the namespace to which Kanister has been deployed, and read `StatefulSet`s which Kanister is instructed to create backups for.
+The `ServiceAccount` used by a `CronJob`, which in the case of the example above is `kanister-sa`, should have permissions to create `ActionSet`s, read `Blueprint`s and `Profile`s in the namespace to which Kanister has been deployed, and read `StatefulSet`s which Kanister is instructed to create backups for.
 
 Below is an example of a `ServiceAccount` configuration with appropriate permissions across an entire cluster.
 
@@ -94,48 +120,3 @@ Below is an example of a `ServiceAccount` configuration with appropriate permiss
       kind: ClusterRole
       name: kanister-sa
       apiGroup: rbac.authorization.k8s.io
-
-### Taweret pod
-
-A Taweret pod can be run by adapting the example pod configuration below. 
-
-The `DAILY_BACKUPS` values and `WEEKLY_BACKUPS` values should be assigned the amount of daily and weekly backups which should be retained, respectively. The default value for `DAILY_BACKUPS` is `7`, and `4` for `WEEKLY_BACKUPS`.
-
-The `KANISTER_NAMESPACE` value should be the name of the namespace to which Kanister and Kanister CRDs have been deployed. The default value is `kanister`.
-
-`BLUEPRINT_NAME` and `S3_PROFILE_NAME` values should be the respective `Blueprint` and `Profile` CRD names used by the backup `ActionSet`. The default values are `postgres-bp` and `s3-profile`.
-
-The `EVAL_SCHEDULE` value should be a cron expression specifying how often existing backup `ActionSets` should be evaluated. The default value is `"1/5 * * * *"` (every 5 minutes).
-
-Taweret exposes Prometheus metrics on port `2112`. In addition to the standard Go metrics, Taweret also exposes the current count of daily and weekly backups as `backup_count_daily` and `backup_count_weekly`.
-
-    apiVersion: v1
-    kind: Pod
-    metadata:
-      name: taweret
-      namespace: kanister
-    labels:
-      app: kanister
-    spec:
-      containers:
-      - name: taweret
-        image: renku/taweret:0.2.0-beta4
-        env:
-        - name: DAILY_BACKUPS
-          value: "7"
-        - name: WEEKLY_BACKUPS
-          value: "4"
-        - name: KANISTER_NAMESPACE
-          value: kanister
-        - name: BLUEPRINT_NAME
-          value: postgres-bp
-        - name: S3_PROFILE_NAME
-          value: s3-profile
-        - name: EVAL_SCHEDULE
-          value: "1/5 * * * *"
-        ports:
-        - containerPort: 2112
-          name: metrics
-          protocol: TCP
-    serviceAccountName: kanister-sa
-
