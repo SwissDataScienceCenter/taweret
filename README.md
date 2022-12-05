@@ -1,22 +1,21 @@
 # Taweret
+
 A [Kanister](https://github.com/kanisterio/kanister) backup management system.
 
-Taweret sets retention periods for Kanister backups and deletes them once they expire by interacting with Kanister CRDs.
+Taweret defines retention periods for Kanister backups and deletes them once they expire by interacting with Kanister CRDs.
 
 This project is in an early development phase. Please check the issues tracker for planned features, or to submit any feature requests.
 
 ## How to
 
-Taweret should be deployed to a Kubernetes cluster which already runs Kanister. 
-
-### Taweret
+Taweret should be deployed to a Kubernetes cluster which already runs Kanister. Kanister currently supports v1alpha1 Kanister CRDs.
 
 Taweret can be installed through its Helm chart:
 
     helm repo add renku https://swissdatasciencecenter.github.io/helm-charts
     helm install taweret renku/taweret
 
-Backup configurations can be defined in the Helm values file. The default backup configuration is:
+Backup configurations are defined in the Helm values file. The default backup configuration is:
 
     backupConfigs:
       daily-postgres:
@@ -36,7 +35,7 @@ The Taweret version which is installed can be set by specifying the image tag us
 
 Please be aware that the default image tag set in the Helm chart may not always be the most up to date Taweret image.
 
-### Backup CronJob
+## Backup CronJob
 
 The `backup-schedule` option at the end of the `kanctl` command labels the `ActionSet` created by the `CronJob` and is used by Taweret to evaluate the backup schedule assigned to the `ActionSet`.
 
@@ -81,7 +80,7 @@ Backup `CronJob`s can be configured in Kubernetes following the example backup `
                   serviceAccountName: kanister-sa
               restartPolicy: Never
 
-### Kanister ServiceAccount
+## Kanister ServiceAccount
 
 The `ServiceAccount` used by a `CronJob`, which in the case of the example above is `kanister-sa`, should have permissions to create `ActionSet`s, read `Blueprint`s and `Profile`s in the namespace to which Kanister has been deployed, and read `StatefulSet`s which Kanister is instructed to create backups for.
 
