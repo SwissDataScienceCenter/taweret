@@ -8,7 +8,7 @@ This project is in an early development phase. Please check the issues tracker f
 
 ## How to
 
-Taweret should be deployed to a Kubernetes cluster which already runs Kanister. Kanister currently supports v1alpha1 Kanister CRDs.
+Taweret should be deployed to a Kubernetes cluster which already runs Kanister. Taweret currently supports v1alpha1 Kanister CRDs.
 
 Taweret can be installed through its Helm chart:
 
@@ -38,8 +38,6 @@ Please be aware that the default image tag set in the Helm chart may not always 
 ## Backup CronJob
 
 The `backup-schedule` option at the end of the `kanctl` command labels the `ActionSet` created by the `CronJob` and is used by Taweret to evaluate the backup schedule assigned to the `ActionSet`.
-
-Taweret currently supports two backups schedules, `daily` and `weekly`.
 
 Backup `CronJob`s can be configured in Kubernetes following the example backup `CronJob` configuration below. 
 
