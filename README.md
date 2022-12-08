@@ -8,7 +8,7 @@ This project is in an early development phase. Please check the issues tracker f
 
 ## How to
 
-Taweret should be deployed to a Kubernetes cluster which already runs Kanister. Kanister currently supports v1alpha1 Kanister CRDs.
+Taweret should be deployed to a Kubernetes cluster which already runs Kanister. Taweret currently supports v1alpha1 Kanister CRDs.
 
 Taweret can be installed through its Helm chart:
 
