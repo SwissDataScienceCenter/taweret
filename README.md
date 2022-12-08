@@ -39,8 +39,6 @@ Please be aware that the default image tag set in the Helm chart may not always 
 
 The `backup-schedule` option at the end of the `kanctl` command labels the `ActionSet` created by the `CronJob` and is used by Taweret to evaluate the backup schedule assigned to the `ActionSet`.
 
-Taweret currently supports two backups schedules, `daily` and `weekly`.
-
 Backup `CronJob`s can be configured in Kubernetes following the example backup `CronJob` configuration below. 
 
     apiVersion: batch/v1
