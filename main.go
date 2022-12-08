@@ -14,14 +14,19 @@ import (
 	"time"
 
 	"github.com/go-co-op/gocron"
+	"github.com/kanisterio/kanister/pkg/apis/cr/v1alpha1"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/yaml.v2"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/kubectl/pkg/scheme"
 )
 
 type backup struct {
@@ -90,10 +95,64 @@ func main() {
 
 	taweretMetrics := initialiseMetrics()
 
-	scheduleEvaluations(dynamicClient, gvr, clientSet, taweretMetrics)
+	// scheduleEvaluations(dynamicClient, gvr, clientSet, taweretMetrics)
+
+	watchEvents(config, dynamicClient, gvr, clientSet, taweretMetrics)
 
 	http.Handle("/metrics", promhttp.Handler())
 	http.ListenAndServe(":2112", nil)
+}
+
+func watchEvents(config *rest.Config, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, clientSet *kubernetes.Clientset, taweretMetrics taweretmetrics) {
+
+	v1alpha1.AddToScheme(scheme.Scheme)
+
+	crdConfig := *config
+	crdConfig.ContentConfig.GroupVersion = &schema.GroupVersion{Group: v1alpha1.ResourceGroup, Version: v1alpha1.SchemeVersion}
+	crdConfig.APIPath = "/apis"
+	crdConfig.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
+	crdConfig.UserAgent = rest.DefaultKubernetesUserAgent()
+
+	exampleRestClient, err := rest.UnversionedRESTClientFor(&crdConfig)
+	if err != nil {
+		panic(err)
+	}
+
+	result := v1alpha1.ActionSetList{}
+	err = exampleRestClient.
+		Get().
+		Resource("actionsets").
+		Do(context.Background()).
+		Into(&result)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("%v\n", result.APIVersion)
+
+	watchlist := cache.NewListWatchFromClient(
+		exampleRestClient,
+		"actionsets",
+		v1.NamespaceAll,
+		fields.Everything(),
+	)
+	_, controller := cache.NewInformer(
+		watchlist,
+		&v1alpha1.ActionSet{},
+		0,
+		cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				fmt.Printf("actionset added: %s \n", obj.(*v1alpha1.ActionSet).Kind)
+			},
+			UpdateFunc: func(old, obj interface{}) {
+				fmt.Printf("actionset changed %s \n", obj.(*v1alpha1.ActionSet).Kind)
+			},
+			DeleteFunc: func(obj interface{}) {
+				fmt.Printf("actionset deleted: %s \n", obj.(*v1alpha1.ActionSet).Kind)
+			},
+		},
+	)
+	go controller.Run(wait.NeverStop)
 }
 
 func scheduleEvaluations(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, clientSet *kubernetes.Clientset, taweretMetrics taweretmetrics) {
@@ -134,7 +193,7 @@ func evaluateBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionRes
 
 	// if there are excess daily backups, delete the oldest excess, then refetch and recategorise the backups
 	if len(categorisedBackups) > int(backupConfig.Retention.Backups) {
-		deleteOldestBackups(categorisedBackups, (len(categorisedBackups) - int(backupConfig.Retention.Backups)), dynamicClient, gvr, backupConfig)
+		// deleteOldestBackups(categorisedBackups, (len(categorisedBackups) - int(backupConfig.Retention.Backups)), dynamicClient, gvr, backupConfig)
 		backups = getBackups(dynamicClient, gvr, backupConfig)
 		categorisedBackups, backupCounts = categoriseBackups(backups, backupConfig)
 	} else {
