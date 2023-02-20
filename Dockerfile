@@ -6,12 +6,12 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /out/taweret .
 
-FROM bitnami/kubectl:1.21 AS bin
+FROM bitnami/kubectl:1.24 AS bin
 COPY --from=build /out/taweret /usr/local/bin/
 
 USER root
 
-RUN /bin/bash -c "curl -L https://github.com/kanisterio/kanister/releases/download/0.78.0/kanister_0.78.0_linux_amd64.tar.gz | tar xvz -C /usr/local/bin/"
+RUN /bin/bash -c "curl -L https://github.com/kanisterio/kanister/releases/download/0.89.0/kanister_0.89.0_linux_amd64.tar.gz | tar xvz -C /usr/local/bin/"
 
 USER 1001
 
