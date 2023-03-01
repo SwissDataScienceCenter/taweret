@@ -198,21 +198,27 @@ func getBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource
 		if actionSpec["name"] != "backup" {
 			continue
 		}
-		if actionOptions, ok := actionSpec["options"]; ok {
-			if backupSchedule, ok := actionOptions.(map[string]interface{})["backup-schedule"]; ok {
-				if backupLocation, ok := actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})["cloudObject"].(map[string]interface{})["keyValue"].(map[string]interface{})["backupLocation"]; ok {
-					thisBackup := backup{
-						name:           fmt.Sprintf("%v", actionMetadata["name"]),
-						status:         fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
-						schedule:       fmt.Sprintf("%v", backupSchedule),
-						backupLocation: fmt.Sprintf("%v", backupLocation),
-					}
-					thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
-					if thisBackup.schedule == backupConfig.Name {
-						backups = append(backups, thisBackup)
-					}
-				}
-			}
+
+		// check for the existence of the keys, if they do not exist, return early. The if statements are split up to avoid runtime errors.
+		if _, ok := actionSpec["options"]; !ok {
+			continue
+		}
+		if _, ok := actionSpec["options"].(map[string]interface{})["backup-schedule"]; !ok {
+			continue
+		}
+		if _, ok := actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})["cloudObject"].(map[string]interface{})["keyValue"].(map[string]interface{})["backupLocation"]; !ok {
+			continue
+		}
+
+		thisBackup := backup{
+			name:           fmt.Sprintf("%v", actionMetadata["name"]),
+			status:         fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
+			schedule:       fmt.Sprintf("%v", actionSpec["options"].(map[string]interface{})["backup-schedule"]),
+			backupLocation: fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})["cloudObject"].(map[string]interface{})["keyValue"].(map[string]interface{})["backupLocation"]),
+		}
+		thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
+		if thisBackup.schedule == backupConfig.Name {
+			backups = append(backups, thisBackup)
 		}
 	}
 	return backups
