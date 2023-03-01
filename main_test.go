@@ -11,7 +11,7 @@ import (
 	fake "k8s.io/client-go/dynamic/fake"
 )
 
-func newUnstructuredBackup(name, namespace, creationTimestamp, actionName, schedule, status string) *unstructured.Unstructured {
+func newUnstructuredBackup(name, namespace, creationTimestamp, actionName, schedule, status, backupLocation string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "cr.kanister.io/v1alpha1",
@@ -33,6 +33,17 @@ func newUnstructuredBackup(name, namespace, creationTimestamp, actionName, sched
 			},
 			"status": map[string]interface{}{
 				"state": status,
+				"actions": []interface{}{
+					map[string]interface{}{
+						"artifacts": map[string]interface{}{
+							"cloudObject": map[string]interface{}{
+								"keyValue": map[string]interface{}{
+									"backupLocation": backupLocation,
+								},
+							},
+						},
+					},
+				},
 			},
 		},
 	}
@@ -41,8 +52,8 @@ func newUnstructuredBackup(name, namespace, creationTimestamp, actionName, sched
 func TestGetBackups(t *testing.T) {
 	defaultTime, _ := time.Parse(time.RFC3339, "2022-01-01T02:03:04.52Z")
 	expectedBackups := []backup{
-		{name: "backup-foo", schedule: "weekly", status: "complete", time: defaultTime},
-		{name: "backup-bar", schedule: "daily", status: "complete", time: defaultTime},
+		{name: "backup-foo", schedule: "weekly", status: "complete", time: defaultTime, backupLocation: "pg_backups/renku/renku-postgresql/2022-01-01T02:03:04.52Z/backup.sql.gz"},
+		{name: "backup-bar", schedule: "daily", status: "complete", time: defaultTime, backupLocation: "pg_backups/renku/renku-postgresql/2022-01-01T02:03:04.52Z/backup.sql.gz"},
 	}
 	sort.Slice(expectedBackups, func(i, j int) bool { return expectedBackups[i].name < expectedBackups[j].name })
 	gvr := schema.GroupVersionResource{
@@ -56,9 +67,9 @@ func TestGetBackups(t *testing.T) {
 		map[schema.GroupVersionResource]string{
 			{Group: "cr.kanister.io", Version: "v1alpha1", Resource: "actionsets"}: "ActionSetsList",
 		},
-		newUnstructuredBackup("backup-foo", "kanister", "2022-01-01T02:03:04.52Z", "backup", "weekly", "complete"),
-		newUnstructuredBackup("backup-bar", "kanister", "2022-01-01T02:03:04.52Z", "backup", "daily", "complete"),
-		newUnstructuredBackup("backup-baz", "kanister", "2022-01-01T02:03:04.52Z", "not-a-backup", "daily", "complete"),
+		newUnstructuredBackup("backup-foo", "kanister", "2022-01-01T02:03:04.52Z", "backup", "weekly", "complete", "pg_backups/renku/renku-postgresql/2022-01-01T02:03:04.52Z/backup.sql.gz"),
+		newUnstructuredBackup("backup-bar", "kanister", "2022-01-01T02:03:04.52Z", "backup", "daily", "complete", "pg_backups/renku/renku-postgresql/2022-01-01T02:03:04.52Z/backup.sql.gz"),
+		newUnstructuredBackup("backup-baz", "kanister", "2022-01-01T02:03:04.52Z", "not-a-backup", "daily", "complete", "pg_backups/renku/renku-postgresql/2022-01-01T02:03:04.52Z/backup.sql.gz"),
 	)
 
 	var backupConfig backupconfig
