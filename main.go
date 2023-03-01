@@ -1,3 +1,4 @@
+// Main is the only package for Taweret
 package main
 
 import (
@@ -6,18 +7,18 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
-	"regexp"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-co-op/gocron"
+	"github.com/kanisterio/kanister/pkg/apis/cr/v1alpha1"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/yaml.v2"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -25,9 +26,9 @@ import (
 )
 
 type backup struct {
-	name, schedule, status string
-	time                   time.Time
-	in_use                 bool
+	name, schedule, status, backupLocation string
+	time                                   time.Time
+	inUse                                  bool
 }
 
 type backupconfig struct {
@@ -45,7 +46,7 @@ type backupconfig struct {
 	}
 }
 
-// type for custom YAML unmarshalling
+// StringInt is a type for custom YAML unmarshalling
 type StringInt int
 
 type taweretmetrics struct {
@@ -199,14 +200,17 @@ func getBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource
 		}
 		if actionOptions, ok := actionSpec["options"]; ok {
 			if backupSchedule, ok := actionOptions.(map[string]interface{})["backup-schedule"]; ok {
-				thisBackup := backup{
-					name:     fmt.Sprintf("%v", actionMetadata["name"]),
-					status:   fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
-					schedule: fmt.Sprintf("%v", backupSchedule),
-				}
-				thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
-				if thisBackup.schedule == backupConfig.Name {
-					backups = append(backups, thisBackup)
+				if backupLocation, ok := actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})["cloudObject"].(map[string]interface{})["keyValue"].(map[string]interface{})["backupLocation"]; ok {
+					thisBackup := backup{
+						name:           fmt.Sprintf("%v", actionMetadata["name"]),
+						status:         fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
+						schedule:       fmt.Sprintf("%v", backupSchedule),
+						backupLocation: fmt.Sprintf("%v", backupLocation),
+					}
+					thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
+					if thisBackup.schedule == backupConfig.Name {
+						backups = append(backups, thisBackup)
+					}
 				}
 			}
 		}
@@ -235,7 +239,7 @@ func categoriseBackups(uncategorisedBackups []backup, backupConfig backupconfig)
 
 	for _, aBackup := range uncategorisedBackups {
 		if aBackup.time.After(maxBackupDateTime) && aBackup.status == "complete" {
-			aBackup.in_use = true
+			aBackup.inUse = true
 			categorisedBackups = append(categorisedBackups, aBackup)
 		} else if aBackup.status == "pending" {
 			backupCounts.pending++
@@ -276,17 +280,58 @@ func sortBackups(backups []backup, backupConfig backupconfig) []backup {
 // deletes a specified backup by creating an actionset with the action 'delete'
 func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) {
 
-	// create kanctl deletion actionset
-	args := []string{"create", "actionset", "--action", "delete", "--from", unusedBackup.name, "--blueprint", backupConfig.BlueprintName, "--profile", backupConfig.ProfileName, "-n", backupConfig.KanisterNamespace, "--namespacetargets", backupConfig.KanisterNamespace}
-	cmd := exec.Command("/usr/local/bin/kanctl", args...)
-	stdout, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("%v: %v\n", backupConfig.Name, err)
+	// set name of deletion actionset
+	deletionActionsetName := fmt.Sprintf("delete-%v", unusedBackup.name)
+
+	// construct actionset crd manifest to delete backup
+	deletionActionSet := v1alpha1.ActionSet{
+		Spec: &v1alpha1.ActionSetSpec{
+			Actions: []v1alpha1.ActionSpec{
+				{
+					Name:      "delete",
+					Blueprint: backupConfig.BlueprintName,
+					Artifacts: map[string]v1alpha1.Artifact{
+						"cloudObject": {
+							KeyValue: map[string]string{
+								"backupLocation": unusedBackup.backupLocation,
+							},
+						},
+					},
+					Object: v1alpha1.ObjectReference{
+						Kind:      "namespace",
+						Name:      backupConfig.KanisterNamespace,
+						Namespace: backupConfig.KanisterNamespace,
+					},
+					Profile: &v1alpha1.ObjectReference{
+						Name:      backupConfig.ProfileName,
+						Namespace: backupConfig.KanisterNamespace,
+					},
+				},
+			},
+		},
+		TypeMeta: v1.TypeMeta{
+			APIVersion: "cr.kanister.io/v1alpha1",
+			Kind:       "ActionSet",
+		},
+		ObjectMeta: v1.ObjectMeta{
+			Name:      deletionActionsetName,
+			Namespace: backupConfig.KanisterNamespace,
+		},
 	}
 
-	// get name of deletion actionset
-	kanctlOutput := strings.TrimSpace(string(stdout))
-	deletionActionsetName := parseKanctlStdout(kanctlOutput)
+	// convert to unstructured to apply with dynamicClient
+	myCRAsUnstructured, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&deletionActionSet)
+	if err != nil {
+		panic(err.Error())
+	}
+	myCRUnstructured := &unstructured.Unstructured{Object: myCRAsUnstructured}
+
+	// apply deletion actionset
+	appliedActionSet, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Create(context.Background(), myCRUnstructured, v1.CreateOptions{})
+	log.Printf("Applying the following deletion actionset: %v", appliedActionSet)
+	if err != nil {
+		panic(err.Error())
+	}
 
 	// loop to check status of deletion actionset whilst actionset is running
 	for {
@@ -308,7 +353,7 @@ func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr sche
 
 		// check if deletion actionset status is "failed"
 		if actionset.Object["status"].(map[string]interface{})["state"] == "failed" {
-			log.Printf("%v: error deleting backup: %v\n", backupConfig.Name, deletionActionsetName)
+			log.Printf("%v: error deleting backup with actionset %v, error: %v\n", backupConfig.Name, deletionActionsetName, actionset.Object["status"].(map[string]interface{})["error"].(map[string]interface{})["message"])
 			break
 		}
 
@@ -325,22 +370,7 @@ func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr sche
 
 }
 
-// parse the stdout from kanctl. If kanctl created the deletion actionset successfully, returns the name of the deletion actionset, else prints the kanctl error and exits.
-func parseKanctlStdout(kanctlOutput string) string {
-	log.Println("parsing kanctl output")
-	match, err := regexp.MatchString("^actionset.*created$", kanctlOutput)
-	if match {
-		deletionActionsetName := strings.TrimPrefix(kanctlOutput, "actionset ")
-		deletionActionsetName = strings.TrimSuffix(deletionActionsetName, " created")
-		return deletionActionsetName
-	} else {
-		log.Printf("error getting kanctl output: %v match: %v error: %v \n ", kanctlOutput, match, err)
-		os.Exit(1)
-	}
-	return kanctlOutput
-}
-
-// custom YAML unmarshaller to allow string to stringint type conversion
+// UnmarshalYAML is a custom YAML unmarshaller to allow string to stringint type conversion
 func (st *StringInt) UnmarshalYAML(b []byte) error {
 	var item interface{}
 	if err := yaml.Unmarshal(b, &item); err != nil {
