@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 golang:1.18.4-alpine3.16 AS build
+FROM --platform=linux/amd64 golang:1.20.1-alpine3.17 AS build
 WORKDIR /src
 ENV CGO_ENABLED=0
 COPY . .
@@ -6,14 +6,8 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /out/taweret .
 
-FROM bitnami/kubectl:1.21 AS bin
+FROM alpine:3.17.2 AS bin
 COPY --from=build /out/taweret /usr/local/bin/
-
-USER root
-
-RUN /bin/bash -c "curl -L https://github.com/kanisterio/kanister/releases/download/0.78.0/kanister_0.78.0_linux_amd64.tar.gz | tar xvz -C /usr/local/bin/"
-
-USER 1001
 
 EXPOSE 2112/tcp
 
