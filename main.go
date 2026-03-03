@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"time"
@@ -61,6 +60,7 @@ type backupcounts struct {
 	failed   int
 	skipped  int
 	deleting int
+	expired  int
 }
 
 func main() {
@@ -94,7 +94,9 @@ func main() {
 	scheduleEvaluations(dynamicClient, gvr, clientSet, taweretMetrics)
 
 	http.Handle("/metrics", promhttp.Handler())
-	http.ListenAndServe(":2112", nil)
+	if err := http.ListenAndServe(":2112", nil); err != nil {
+		log.Fatalf("metrics server failed: %v", err)
+	}
 }
 
 func scheduleEvaluations(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, clientSet *kubernetes.Clientset, taweretMetrics taweretmetrics) {
@@ -109,34 +111,61 @@ func scheduleEvaluations(dynamicClient dynamic.Interface, gvr schema.GroupVersio
 	}
 	s.StartAsync()
 	log.Printf("first evaluation scheduled: %v, evaluation schedule: %v", job.NextRun(), evalSchedule)
-
 }
 
 func startEvaluation(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, clientSet *kubernetes.Clientset, taweretMetrics taweretmetrics) {
 	log.Printf("starting backup config evaluations\n")
 
-	// get backupConfigs
-	backupConfigs := getBackupConfigs(clientSet, gvr)
+	backupConfigs, err := getBackupConfigs(clientSet)
+	if err != nil {
+		log.Printf("skipping evaluation: %v\n", err)
+		return
+	}
 
-	// evaluate backupConfigs
+	actionSetCache := make(map[string][]unstructured.Unstructured)
+	for _, bc := range backupConfigs {
+		if _, ok := actionSetCache[bc.KanisterNamespace]; !ok {
+			items, err := listActionSets(dynamicClient, gvr, bc.KanisterNamespace)
+			if err != nil {
+				log.Printf("error listing actionsets in namespace %v: %v\n", bc.KanisterNamespace, err)
+				continue
+			}
+			actionSetCache[bc.KanisterNamespace] = items
+		}
+	}
+
 	for _, backupConfig := range backupConfigs {
-		evaluateBackups(dynamicClient, gvr, taweretMetrics, backupConfig)
+		items, ok := actionSetCache[backupConfig.KanisterNamespace]
+		if !ok {
+			log.Printf("%v: skipping evaluation: failed to list actionsets in namespace %v\n", backupConfig.Name, backupConfig.KanisterNamespace)
+			continue
+		}
+		evaluateBackups(items, dynamicClient, gvr, taweretMetrics, backupConfig)
 	}
 	log.Printf("backup config evaluations complete\n---\n")
 }
 
-func evaluateBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, taweretMetrics taweretmetrics, backupConfig backupconfig) {
-
+func evaluateBackups(cachedActionSets []unstructured.Unstructured, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, taweretMetrics taweretmetrics, backupConfig backupconfig) {
 	log.Printf("%v: evaluating backups\n", backupConfig.Name)
 
-	backups := getBackups(dynamicClient, gvr, backupConfig)
+	backups, err := filterBackups(cachedActionSets, backupConfig)
+	if err != nil {
+		log.Printf("%v: skipping evaluation: %v\n", backupConfig.Name, err)
+		return
+	}
 
 	categorisedBackups, backupCounts := categoriseBackups(backups, backupConfig)
 
-	// if there are excess daily backups, delete the oldest excess, then refetch and recategorise the backups
 	if len(categorisedBackups) > int(backupConfig.Retention.Backups) {
-		deleteOldestBackups(categorisedBackups, (len(categorisedBackups) - int(backupConfig.Retention.Backups)), dynamicClient, gvr, backupConfig)
-		backups = getBackups(dynamicClient, gvr, backupConfig)
+		if err := deleteOldestBackups(categorisedBackups, (len(categorisedBackups) - int(backupConfig.Retention.Backups)), dynamicClient, gvr, backupConfig); err != nil {
+			log.Printf("%v: skipping metrics update after deletion error: %v\n", backupConfig.Name, err)
+			return
+		}
+		backups, err = getBackups(dynamicClient, gvr, backupConfig)
+		if err != nil {
+			log.Printf("%v: skipping metrics update after refetch error: %v\n", backupConfig.Name, err)
+			return
+		}
 		categorisedBackups, backupCounts = categoriseBackups(backups, backupConfig)
 	} else {
 		log.Printf("%v: no backups deleted: current: %v limit: %v\n", backupConfig.Name, len(categorisedBackups), backupConfig.Retention.Backups)
@@ -147,13 +176,11 @@ func evaluateBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionRes
 	log.Printf("%v: backup evaluation complete\n", backupConfig.Name)
 }
 
-func getBackupConfigs(clientset *kubernetes.Clientset, gvr schema.GroupVersionResource) []backupconfig {
+func getBackupConfigs(clientset *kubernetes.Clientset) ([]backupconfig, error) {
 	var backupConfigs []backupconfig
-	// get configmaps
 	configmaps, err := clientset.CoreV1().ConfigMaps("kanister").List(context.TODO(), v1.ListOptions{})
 	if err != nil {
-		log.Printf("error getting actionsets: %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("error getting configmaps: %w", err)
 	}
 
 	for _, configmap := range configmaps.Items {
@@ -162,8 +189,7 @@ func getBackupConfigs(clientset *kubernetes.Clientset, gvr schema.GroupVersionRe
 
 			err = yaml.Unmarshal([]byte(configmap.Data["backup-config.yaml"]), &backupConfig)
 			if err != nil {
-				log.Printf("error unmarshalling backup-config.yaml: %v\n", err)
-				os.Exit(1)
+				return nil, fmt.Errorf("error unmarshalling backup-config.yaml from configmap %v: %w", configmap.Name, err)
 			}
 
 			backupConfigs = append(backupConfigs, backupConfig)
@@ -171,74 +197,127 @@ func getBackupConfigs(clientset *kubernetes.Clientset, gvr schema.GroupVersionRe
 			log.Printf("backup config:\n name: %v\n kanister namespace: %v\n blueprint name: %v\n profile name: %v\n retention:\n backups: %v\n years: %v months: %v days: %v hours %v minutes: %v", backupConfig.Name, backupConfig.KanisterNamespace, backupConfig.BlueprintName, backupConfig.ProfileName, backupConfig.Retention.Backups, backupConfig.Retention.Years, backupConfig.Retention.Months, backupConfig.Retention.Days, backupConfig.Retention.Hours, backupConfig.Retention.Minutes)
 		}
 	}
-	return backupConfigs
+	return backupConfigs, nil
 }
 
-// queries Kubernetes for Actionsets, adds the actionsets with action name 'backup' to a slice of backup objects and returns the slice
-func getBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) []backup {
+// listActionSets fetches all ActionSets from the given namespace.
+func listActionSets(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, namespace string) ([]unstructured.Unstructured, error) {
+	log.Printf("retrieving actionsets from namespace %v", namespace)
+	actionsets, err := dynamicClient.Resource(gvr).Namespace(namespace).List(context.Background(), v1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("error listing actionsets in namespace %v: %w", namespace, err)
+	}
+	return actionsets.Items, nil
+}
+
+// getBackups lists and filters ActionSets matching the backup config.
+// Used for post-deletion refetches where a fresh API call is required.
+func getBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) ([]backup, error) {
+	items, err := listActionSets(dynamicClient, gvr, backupConfig.KanisterNamespace)
+	if err != nil {
+		return nil, fmt.Errorf("%v: %w", backupConfig.Name, err)
+	}
+	return filterBackups(items, backupConfig)
+}
+
+// filterBackups filters a slice of ActionSets to those matching the given backup config.
+// Malformed ActionSets are skipped with a warning rather than panicking.
+func filterBackups(actionsets []unstructured.Unstructured, backupConfig backupconfig) ([]backup, error) {
 	var backups []backup
 
-	log.Printf("%v: retrieving actionsets from Kubernetes", backupConfig.Name)
+	log.Printf("%v: filtering backup actionsets", backupConfig.Name)
 
-	// get actionsets
-	actionsets, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).List(context.Background(), v1.ListOptions{})
-	if err != nil {
-		log.Printf("%v: error getting actionsets: %v\n", backupConfig.Name, err)
-		os.Exit(1)
-	}
-
-	log.Printf("%v: filtering backup actionsets from Kubernetes", backupConfig.Name)
-
-	// loop through actionsets
-	for _, actionset := range actionsets.Items {
-		actionSpec := actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})
-		actionMetadata := actionset.Object["metadata"].(map[string]interface{})
-
-		// skip ahead if the ActionSet is not a backup
-		if actionSpec["name"] != "backup" {
+	for _, actionset := range actionsets {
+		// Safe extraction of spec.actions[0].
+		actions, found, err := unstructured.NestedSlice(actionset.Object, "spec", "actions")
+		if err != nil || !found || len(actions) == 0 {
+			continue
+		}
+		actionMap, ok := actions[0].(map[string]interface{})
+		if !ok {
 			continue
 		}
 
-		// check for the existence of the keys, if they do not exist, return early. The if statements are split up to avoid runtime errors.
-		if _, ok := actionSpec["options"]; !ok {
+		actionName, ok := actionMap["name"].(string)
+		if !ok || actionName != "backup" {
 			continue
 		}
-		if _, ok := actionSpec["options"].(map[string]interface{})["backup-schedule"]; !ok {
+
+		optionsMap, ok := actionMap["options"].(map[string]interface{})
+		if !ok {
 			continue
 		}
-		if _, ok := actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})["cloudObject"].(map[string]interface{})["keyValue"].(map[string]interface{})["backupLocation"]; !ok {
+		schedule, ok := optionsMap["backup-schedule"].(string)
+		if !ok {
+			continue
+		}
+
+		// Only process ActionSets belonging to this backup config's schedule.
+		if schedule != backupConfig.Name {
+			continue
+		}
+
+		name, _, _ := unstructured.NestedString(actionset.Object, "metadata", "name")
+		status, _, _ := unstructured.NestedString(actionset.Object, "status", "state")
+		creationTimestamp, _, _ := unstructured.NestedString(actionset.Object, "metadata", "creationTimestamp")
+
+		// Safe extraction of the nested backupLocation artifact.
+		statusActions, found, err := unstructured.NestedSlice(actionset.Object, "status", "actions")
+		if err != nil || !found || len(statusActions) == 0 {
+			log.Printf("%v: actionset %v has no status.actions, skipping\n", backupConfig.Name, name)
+			continue
+		}
+		statusActionMap, ok := statusActions[0].(map[string]interface{})
+		if !ok {
+			log.Printf("%v: actionset %v status.actions[0] is not a map, skipping\n", backupConfig.Name, name)
+			continue
+		}
+		artifacts, ok := statusActionMap["artifacts"].(map[string]interface{})
+		if !ok {
+			log.Printf("%v: actionset %v has no artifacts, skipping\n", backupConfig.Name, name)
+			continue
+		}
+		cloudObject, ok := artifacts["cloudObject"].(map[string]interface{})
+		if !ok {
+			log.Printf("%v: actionset %v has no cloudObject artifact, skipping\n", backupConfig.Name, name)
+			continue
+		}
+		keyValue, ok := cloudObject["keyValue"].(map[string]interface{})
+		if !ok {
+			log.Printf("%v: actionset %v cloudObject has no keyValue, skipping\n", backupConfig.Name, name)
+			continue
+		}
+		backupLocation, ok := keyValue["backupLocation"].(string)
+		if !ok {
+			log.Printf("%v: actionset %v has no backupLocation, skipping\n", backupConfig.Name, name)
 			continue
 		}
 
 		thisBackup := backup{
-			name:           fmt.Sprintf("%v", actionMetadata["name"]),
-			status:         fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
-			schedule:       fmt.Sprintf("%v", actionSpec["options"].(map[string]interface{})["backup-schedule"]),
-			backupLocation: fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})["cloudObject"].(map[string]interface{})["keyValue"].(map[string]interface{})["backupLocation"]),
+			name:           name,
+			status:         status,
+			schedule:       schedule,
+			backupLocation: backupLocation,
 		}
-		thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
-		if thisBackup.schedule == backupConfig.Name {
-			backups = append(backups, thisBackup)
+		thisBackup.time, err = time.Parse(time.RFC3339, creationTimestamp)
+		if err != nil {
+			log.Printf("%v: failed to parse creationTimestamp for actionset %v, skipping: %v\n", backupConfig.Name, name, err)
+			continue
 		}
+
+		backups = append(backups, thisBackup)
 	}
-	return backups
+	return backups, nil
 }
 
-// determine whether individual backups are required based on max retention dates and their category (daily, weekly, none)
+// determine whether individual backups are required based on max retention dates and their category
 func categoriseBackups(uncategorisedBackups []backup, backupConfig backupconfig) ([]backup, backupcounts) {
 	var categorisedBackups []backup
-	backupCounts := backupcounts{
-		pending:  0,
-		running:  0,
-		failed:   0,
-		skipped:  0,
-		deleting: 0,
-	}
+	backupCounts := backupcounts{}
 
 	log.Printf("%v: categorising backups\n", backupConfig.Name)
 
 	maxBackupDateTime := time.Now()
-
 	maxBackupDateTime = maxBackupDateTime.Add(time.Minute * time.Duration(backupConfig.Retention.Minutes) * -1)
 	maxBackupDateTime = maxBackupDateTime.Add(time.Hour * time.Duration(backupConfig.Retention.Hours) * -1)
 	maxBackupDateTime = maxBackupDateTime.AddDate(int(backupConfig.Retention.Years)*-1, int(backupConfig.Retention.Months)*-1, int(backupConfig.Retention.Days)*-1)
@@ -247,6 +326,9 @@ func categoriseBackups(uncategorisedBackups []backup, backupConfig backupconfig)
 		if aBackup.time.After(maxBackupDateTime) && aBackup.status == "complete" {
 			aBackup.inUse = true
 			categorisedBackups = append(categorisedBackups, aBackup)
+		} else if aBackup.status == "complete" {
+			// complete backup outside the retention window
+			backupCounts.expired++
 		} else if aBackup.status == "pending" {
 			backupCounts.pending++
 		} else if aBackup.status == "running" {
@@ -260,23 +342,25 @@ func categoriseBackups(uncategorisedBackups []backup, backupConfig backupconfig)
 		}
 	}
 
-	categorisedAndSortedBackups := sortBackups(categorisedBackups, backupConfig)
+	categorisedAndSortedBackups := sortBackups(categorisedBackups)
 
 	return categorisedAndSortedBackups, backupCounts
 }
 
 // delete a specified number of the oldest backups in a backup slice
-func deleteOldestBackups(backups []backup, count int, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) {
-	backups = sortBackups(backups, backupConfig)
+func deleteOldestBackups(backups []backup, count int, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) error {
+	backups = sortBackups(backups)
 	for i := 0; i < count; i++ {
 		log.Printf("%v: deleting backup %v, backup time: %v, deletion nr %v, total to delete %v, total backups in category: %v\n", backupConfig.Name, backups[i].name, backups[i].time.UTC(), i+1, count, len(backups))
-		deleteBackup(backups[i], dynamicClient, gvr, backupConfig)
+		if err := deleteBackup(backups[i], dynamicClient, gvr, backupConfig); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // sort the backup slices with the oldest backups placed at the start of the slice
-func sortBackups(backups []backup, backupConfig backupconfig) []backup {
-	log.Printf("%v: sorting backups chronologically\n", backupConfig.Name)
+func sortBackups(backups []backup) []backup {
 	sort.Slice(backups, func(q, p int) bool {
 		return backups[p].time.After(backups[q].time)
 	})
@@ -284,9 +368,9 @@ func sortBackups(backups []backup, backupConfig backupconfig) []backup {
 }
 
 // deletes a specified backup by creating an actionset with the action 'delete'
-func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) {
+func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) error {
+	const deletionTimeout = 30 * time.Minute
 
-	// set name of deletion actionset
 	deletionActionsetName := fmt.Sprintf("delete-%v", unusedBackup.name)
 
 	// construct actionset crd manifest to delete backup
@@ -333,47 +417,70 @@ func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr sche
 	myCRUnstructured := &unstructured.Unstructured{Object: myCRAsUnstructured}
 
 	// apply deletion actionset
-	appliedActionSet, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Create(context.Background(), myCRUnstructured, v1.CreateOptions{})
-	log.Printf("Applying the following deletion actionset: %v", appliedActionSet)
+	_, err = dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Create(context.Background(), myCRUnstructured, v1.CreateOptions{})
 	if err != nil {
-		panic(err.Error())
+		return fmt.Errorf("%v: error applying deletion actionset %v: %w", backupConfig.Name, deletionActionsetName, err)
 	}
+	log.Printf("%v: applied deletion actionset %v", backupConfig.Name, deletionActionsetName)
 
-	// loop to check status of deletion actionset whilst actionset is running
+	ctx, cancel := context.WithTimeout(context.Background(), deletionTimeout)
+	defer cancel()
+
+	// cleanupDeletionAS is set to true when we need to delete the deletion ActionSet
+	// on the way out (failure, error, or timeout). On success we leave it for auditing.
+	cleanupDeletionAS := false
+	defer func() {
+		if !cleanupDeletionAS {
+			return
+		}
+		if err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Delete(
+			context.Background(), deletionActionsetName, v1.DeleteOptions{},
+		); err != nil {
+			log.Printf("%v: warning: failed to clean up deletion actionset %v: %v\n", backupConfig.Name, deletionActionsetName, err)
+		}
+	}()
+
+	// poll until the deletion ActionSet reaches a terminal state or times out
+pollLoop:
 	for {
-		log.Printf("%v: waiting for %v to complete... ", backupConfig.Name, deletionActionsetName)
+		select {
+		case <-ctx.Done():
+			cleanupDeletionAS = true
+			return fmt.Errorf("%v: timed out after %v waiting for deletion actionset %v", backupConfig.Name, deletionTimeout, deletionActionsetName)
+		default:
+		}
+
 		time.Sleep(5 * time.Second)
 
-		// get deletion actionset
-		actionset, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Get(context.Background(), deletionActionsetName, v1.GetOptions{})
+		actionset, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Get(ctx, deletionActionsetName, v1.GetOptions{})
 		if err != nil {
-			log.Printf("%v: error retrieving deletion actionset: %v\n", backupConfig.Name, err)
-			os.Exit(1)
+			cleanupDeletionAS = true
+			if ctx.Err() != nil {
+				return fmt.Errorf("%v: timed out after %v waiting for deletion actionset %v", backupConfig.Name, deletionTimeout, deletionActionsetName)
+			}
+			return fmt.Errorf("%v: error retrieving deletion actionset %v: %w", backupConfig.Name, deletionActionsetName, err)
 		}
 
-		// check if deletion actionset status is "complete"
-		if actionset.Object["status"].(map[string]interface{})["state"] == "complete" {
+		state, _, _ := unstructured.NestedString(actionset.Object, "status", "state")
+		switch state {
+		case "complete":
 			log.Printf("%v: %v has completed\n", backupConfig.Name, deletionActionsetName)
-			break
+			break pollLoop
+		case "failed":
+			cleanupDeletionAS = true
+			errMsg, _, _ := unstructured.NestedString(actionset.Object, "status", "error", "message")
+			return fmt.Errorf("%v: deletion actionset %v failed: %v", backupConfig.Name, deletionActionsetName, errMsg)
+		default:
+			log.Printf("%v: deletion actionset %v state: %v\n", backupConfig.Name, deletionActionsetName, state)
 		}
-
-		// check if deletion actionset status is "failed"
-		if actionset.Object["status"].(map[string]interface{})["state"] == "failed" {
-			log.Printf("%v: error deleting backup with actionset %v, error: %v\n", backupConfig.Name, deletionActionsetName, actionset.Object["status"].(map[string]interface{})["error"].(map[string]interface{})["message"])
-			break
-		}
-
-		// print current state of deletion actionset
-		log.Printf("%v\n", actionset.Object["status"].(map[string]interface{})["state"])
 	}
 
-	// delete backup actionset
-	err = dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Delete(context.Background(), unusedBackup.name, v1.DeleteOptions{})
-	if err != nil {
-		log.Printf("%v: error deleting backup actionset: %v\n", backupConfig.Name, err)
-		os.Exit(1)
+	// delete the original backup actionset
+	if err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Delete(context.Background(), unusedBackup.name, v1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("%v: error deleting backup actionset %v: %w", backupConfig.Name, unusedBackup.name, err)
 	}
 
+	return nil
 }
 
 // UnmarshalYAML is a custom YAML unmarshaller to allow string to stringint type conversion
@@ -415,7 +522,7 @@ func initialiseMetrics() taweretmetrics {
 	taweretMetrics.oldestBackup = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "oldest_backup_timestamp",
-			Help: "The amount of backups",
+			Help: "Unix timestamp of the oldest retained complete backup",
 		},
 		[]string{
 			// which backup config
@@ -425,7 +532,7 @@ func initialiseMetrics() taweretmetrics {
 	taweretMetrics.newestBackup = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "newest_backup_timestamp",
-			Help: "The amount of backups",
+			Help: "Unix timestamp of the newest retained complete backup",
 		},
 		[]string{
 			// which backup config
@@ -448,14 +555,14 @@ func (taweretMetrics *taweretmetrics) setMetrics(backups []backup, backupConfig 
 	if len(backups) > 0 {
 		taweretMetrics.oldestBackup.WithLabelValues(backupConfig.Name).Set(float64(backups[0].time.Unix()))
 		taweretMetrics.newestBackup.WithLabelValues(backupConfig.Name).Set(float64(backups[len(backups)-1].time.Unix()))
-
 	} else {
 		taweretMetrics.oldestBackup.WithLabelValues(backupConfig.Name).Set(0)
 		taweretMetrics.newestBackup.WithLabelValues(backupConfig.Name).Set(0)
 	}
 
-	// set backupCount for completed, pending, running, failed, skipped and deleting state backups
+	// set backupCount for all states
 	taweretMetrics.backupCount.WithLabelValues(backupConfig.Name, "completed").Set(float64(len(backups)))
+	taweretMetrics.backupCount.WithLabelValues(backupConfig.Name, "expired").Set(float64(backupCounts.expired))
 	taweretMetrics.backupCount.WithLabelValues(backupConfig.Name, "pending").Set(float64(backupCounts.pending))
 	taweretMetrics.backupCount.WithLabelValues(backupConfig.Name, "running").Set(float64(backupCounts.running))
 	taweretMetrics.backupCount.WithLabelValues(backupConfig.Name, "failed").Set(float64(backupCounts.failed))

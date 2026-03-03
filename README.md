@@ -73,7 +73,7 @@ Backup `CronJob`s can be configured in Kubernetes following the example backup `
                       value: default-profile
                   args:
                     - |
-                      curl -L https://github.com/kanisterio/kanister/releases/download/0.78.0/kanister_0.78.0_linux_amd64.tar.gz | tar xvz -C /usr/local/bin/
+                      curl -L https://github.com/kanisterio/kanister/releases/download/0.118.0/kanister_0.118.0_linux_amd64.tar.gz | tar xvz -C /usr/local/bin/
                       kanctl -n kanister create actionset --action backup --namespace kanister --blueprint $BLUEPRINT --statefulset $STATEFULSET --profile $PROFILE --options backup-schedule=weekly
                   serviceAccountName: kanister-sa
               restartPolicy: Never
