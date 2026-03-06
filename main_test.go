@@ -76,7 +76,10 @@ func TestGetBackups(t *testing.T) {
 	backupConfig.KanisterNamespace = "kanister"
 	backupConfig.Name = "daily"
 
-	backups := getBackups(client, gvr, backupConfig)
+	backups, err := getBackups(client, gvr, backupConfig)
+	if err != nil {
+		t.Fatalf("unexpected error from getBackups: %v", err)
+	}
 	if len(backups) < 1 {
 		t.Fatal("Empty backups")
 	}
